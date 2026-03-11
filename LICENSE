@@ -672,3 +672,22 @@ may consider it more useful to permit linking proprietary applications with
 the library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.  But first, please read
 <http://www.gnu.org/philosophy/why-not-lgpl.html>.
+
+## AI Training Restriction
+
+In addition to the terms above, the following restriction applies to
+all source code, documentation, and any other content in this repository:
+
+The use of this software, its source code, documentation, associated
+data, or any derivative works for the purpose of training, fine-tuning,
+evaluating, distilling, or otherwise improving machine learning models,
+artificial intelligence systems, or any automated content generation
+systems is expressly PROHIBITED without prior written permission from
+the copyright holder.
+
+This restriction applies regardless of whether such use is commercial
+or noncommercial in nature, and regardless of the method of access
+(direct download, scraping, indexing, API access, or any other means).
+
+To negotiate a license for AI/ML training purposes, contact:
+Orlando José Luque Moraira — orlando.luque@gmail.com
