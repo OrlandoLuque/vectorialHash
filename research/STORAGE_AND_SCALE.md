@@ -127,6 +127,45 @@ AABBs. vs `Tree3::bulk_load`, world 10 000³, bubble r=500:
 and the construction is fully data-parallel (the GPU broad-phase route, reusing
 the Morton encoding).
 
+### 7a. GPU LBVH — the query kernel vs the per-frame reality (`gpu_spatial_bench`)
+
+The LBVH traversal is a stack-based sphere-vs-AABB descent in a wgpu compute
+shader (leaf indexes the Morton-sorted points). The **raw query kernel** is
+dramatic — N points × M queries, one dispatch:
+
+| workload | GPU brute | GPU LBVH | CPU `Tree3` cull (serial) |
+| --- | --- | --- | --- |
+| 1 M pts × 10 k queries, r=500 | 41.6 ms | **1.4 ms** | 153 ms |
+| 100 k × 20 k, r=30, clustered | 4.9 ms | **0.28 ms** | 43 ms |
+
+But that headline is **only the query**. For a **moving** cloud (a game/world
+sim) the points change every frame, so the LBVH must be **rebuilt every frame**
+(sort + build) — whereas the in-memory keep-index does **not** rebuild
+(`update_ref` in place). The honest per-frame comparison is *(rebuild + GPU
+dispatch)* vs *(keep-index maintain + cull)*, and the CPU cull should be the
+**parallel** `cull_many_par`, not the serial loop. Measured per-frame ms:
+
+| workload | keep-index maintain | CPU par cull | **CPU frame** | LBVH rebuild | GPU dispatch | **GPU frame** | winner |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 M, 10 k, r=500 | 48.3 | 13.5 | **61.9** | 79.0 | 1.4 | **80.5** | **CPU 1.30×** |
+| 100 k, 20 k, r=30 | 4.7 | 4.3 | **9.0** | 5.1 | 0.3 | **5.4** | GPU 1.66× |
+| 100 k, 20 k, r=150 | 4.9 | 35.9 | **40.8** | 5.0 | 4.0 | **9.0** | GPU 4.53× |
+
+The **rebuild : query** ratio decides it. The CPU-side LBVH rebuild is *N log N*
+(the sort); the keep-index maintain is *linear*, so the rebuild overtakes it as N
+grows — at 1 M the ~79 ms rebuild sinks the GPU frame and the **parallel
+keep-index wins**. Heavy per-query work (big radius / dense clusters) floats the
+GPU back up (r=150 → 4.5×). So:
+
+- **GPU LBVH wins** for query-dominated or **rebuild-anyway (static)** loads —
+  where there's no per-frame keep-index to compare against, the ~100× kernel is
+  the whole story.
+- **The in-memory keep-index wins** for moving data at large N once the cull is
+  parallelised — it skips the rebuild the GPU can't avoid.
+- A **GPU-side build** (parallel radix sort + Karras on the GPU, not built here)
+  would erase the rebuild penalty and push the crossover past 1 M. That is the
+  route if spatial queries move wholesale to the GPU.
+
 ## 8. Structure selection — churn, crossover, and a self-tuning advisor
 
 **Relocation rate** (`churn_relocation_bench`, 200 k moving, leaf ≈ 345 wu): the
@@ -164,3 +203,7 @@ rather than a global guess.
 - **In-memory:** the adaptive keep-index tree for moving points; a Morton grid
   for rebuild-per-frame; LBVH for fast static/parallel builds; brute force below
   ~500–1 000 items. Let the advisor pick from measured local rates.
+- **GPU offload:** the GPU LBVH query kernel is ~100× the serial CPU cull, but
+  for *moving* data the per-frame rebuild eats most of that — a **parallel
+  keep-index** beats it at 1 M. Offload to the GPU only for query-dominated or
+  **static / rebuild-anyway** loads (or after moving the build onto the GPU).
