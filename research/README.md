@@ -19,6 +19,7 @@ and link back here for the full derivation.
 | [`BENCHMARKS.md`](BENCHMARKS.md) | Template-driven culling: methodology + full reproducible result tables (single-template, per-cell-size selection, descent vs neighbour walk, granularity-as-fallback, figure↔grid scale equivalence, full dynamic critters workload). |
 | [`UPDATE_STRATEGIES.md`](UPDATE_STRATEGIES.md) | Empirical comparison of the `Tree::update` relocation strategies (Legacy / Lca / LcaRopes), the `neighbors`-feature cost, and the IntegerTree bit-shift experiment — the 135-cell formal sweep + analysis. |
 | [`STORAGE_AND_SCALE.md`](STORAGE_AND_SCALE.md) | Large / persistent / on-disk workloads and structure selection: sorted space-filling-curve key over a KV (cell-probe vs the naïve-range trap), a real redb cold store, B-tree vs LSM engines, layering for sparse worlds, Morton vs Hilbert locality, sorted-key compression, an LBVH built from Morton codes, and a churn/crossover-driven structure advisor. |
+| [`LESSONS_LEARNED.md`](LESSONS_LEARNED.md) | Honest, measurement-driven self-critique: where the original thesis did **not** hold up (the binary split rarely wins outright; templates/raster are conditional; the biggest win is a known technique — the contribution is the *measurement*; the memory wall beats several precompute ideas; the GPU is no free lunch for moving data), plus threats to validity. |
 | [`benchmarks/`](benchmarks) | The raw data (`sweep_*.csv`) and the PowerShell drivers/analysers (`sweep_*.ps1`, `analyze_*.ps1`, `run_night.ps1`) that produced those tables. |
 
 ## Reproducing
