@@ -14,6 +14,7 @@ path or the template bank, and refresh the tables.
 | [4](#results-4--vh-bench-fallback-granularity-as-fallback-aggregation) | `vh bench-fallback`: granularity-as-fallback aggregation | The aggregated fallback is **exact**, costs 0.59 MB vs 1.70 MB of full precomputation, ~3× the no-template baseline. Memory/precompute knob. |
 | [5](#results-5--vh-bench-scale-figureleftrightgrid-scale-equivalence) | `vh bench-scale`: figure↔grid scale equivalence | One canonical set serves many query scales: 25× less memory, 10× faster generation; cull cost equals direct at low factors, ~2.5× at factor 8. |
 | [6](#results-6--headless-critters-a-full-dynamic-workload) | `critters_headless`: full dynamic workload (updates + culls + churn) | Quadtree ahead 10–35% even on dynamic ops (depth halves `locate`); hysteresis helps the binary tree; `item_limit` is the dominant knob; deterministic cross-structure runs with zero cull mismatches. |
+| [7](#results-7--gpu-sort-the-on-gpu-lbvh-build-and-the-keeprebuild-crossover-2026-07-17) | GPU: radix sort · on-GPU LBVH build · keep↔rebuild crossover + adaptive | GPU radix ~2× the CPU (bitonic was ~2× slower); a whole LBVH builds **GPU-resident in ~8 ms/frame at 1 M** (verified by traversal-vs-brute); moving-data crossover at **f\* ≈ 12–16 % moving** (drops with N); adaptive-with-hysteresis beats both pure strategies. |
 
 ## Environment
 
@@ -373,3 +374,113 @@ None of these precompute shape-vs-grid classification templates; they all run
 exact (or conservative AABB) per-object tests after the broadphase. The
 template bank + 1×1 raster is orthogonal to the choice of structure — as the
 numbers show, it accelerates the industry baselines too.
+
+## Results 7 — GPU: sort, the on-GPU LBVH build, and the keep↔rebuild crossover (2026-07-17)
+
+Environment: NVIDIA RTX 4080 SUPER via `wgpu` compute (WGSL), Windows. All GPU
+results are **verified against a CPU reference** (a build/sort is only reported
+once its output matches brute force / a CPU sort exactly). Reproducible benches
+live in the kit (`vectorial-hash-demos/examples/`): `gpu_spatial_bench`,
+`gpu_sort_bench`, `gpu_radix_bench`, `gpu_lbvh_build_bench`; and the library
+`compact_bench`.
+
+### 7.1 GPU sort of Morton codes — bitonic (negative) → radix (~2× the CPU)
+
+The on-GPU LBVH build needs the Morton-code **sort** on the GPU. Two attempts:
+
+- **Bitonic** (`gpu_sort_bench`) — verified == a CPU sort, but **~2× *slower***
+  than `sort_unstable` (log²(N) compare-exchange passes, one dispatch/submit each;
+  the log² work factor + per-pass sync sink it). An honest negative — the right
+  primitive is a radix sort.
+- **Stable 4-bit LSD radix**, all-GPU (`gpu_radix_bench`) — 3 kernels/pass
+  (per-tile histogram → exclusive scan → stable local-rank scatter), ping-pong,
+  8 passes, no CPU in the loop. Verified == CPU at every size. The scan is the
+  crux: a single-workgroup serial scan left it only **at parity** with the CPU;
+  parallelising it **16-way** (one thread per digit) put it clear:
+
+  | keys | GPU radix | CPU `sort_unstable` | speedup |
+  | --- | --- | --- | --- |
+  | 262 k | 1.09 ms | 2.58 ms | **2.37×** |
+  | 1 M | 6.31 ms | 11.16 ms | **1.77×** |
+  | 4 M | 24.51 ms | 48.38 ms | **1.97×** |
+
+  Lesson (recurs throughout): the bottleneck was a **serial section**, not the
+  algorithm — Amdahl in miniature. A multi-workgroup decoupled-lookback (Onesweep)
+  scan would scale it further.
+
+### 7.2 A whole LBVH built on the GPU — Morton → radix → Karras → refit
+
+`gpu_lbvh_build_bench` builds an LBVH **entirely GPU-resident**, no round-trip:
+Morton codes (30-bit, GPU) → the key-value radix above (codes + primitive index)
+→ **Karras** hierarchy (common-prefix ranges + split, with the point index as a
+tiebreaker so equal codes stay well-founded) → **AABB refit** (a leaf-init pass,
+then a bottom-up climb gated by an atomic per node — only the *second* child to
+arrive unions the two boxes). Verified end-to-end by **traversing the GPU-built
+BVH on the CPU and comparing to brute force** over random spheres (a pass ⇒ the
+hierarchy *and* the refit AABBs are correct), first try, at every size:
+
+| points | build/frame (min of 7) | throughput |
+| --- | --- | --- |
+| 262 k | 1.69 ms | 155 Mpts/s |
+| 1 M | 8.39 ms | 125 Mpts/s |
+| 4 M | 36.3 ms | 116 Mpts/s |
+
+So a **1 M-point BVH rebuilds on the GPU in ~8 ms/frame**. (The atomic refit
+relies on the platform's atomic ordering for cross-workgroup visibility — correct
+on this NVIDIA hardware per the verify; a level-by-level refit would be
+spec-portable.)
+
+### 7.3 The moving-data crossover — GPU rebuild vs CPU keep-index
+
+The point of the on-GPU build: for **moving** data, a per-frame rebuild competes
+with the CPU keep-index (`update_ref` in place). The keep-index's real edge is
+that it **skips items that didn't move**, so its cost is ~linear in the *moving
+fraction* while the GPU rebuild is flat. Measured on the same points (keep at its
+best case — tiny jitter, ~no relocations):
+
+| N | GPU rebuild | CPU keep (best) | CPU rebuild (`bulk_load_par`) |
+| --- | --- | --- | --- |
+| 262 k | 1.7 ms | 8.4 ms | 37.9 ms |
+| 1 M | 9.3 ms | 80 ms | 130 ms |
+| 4 M | 35 ms | 517 ms | 834 ms |
+
+The rule is by **moving fraction**, not just N: with *most* of the cloud moving
+the parallel GPU rebuild wins (a serial maintain-*all* pass loses to a parallel
+from-scratch build); with a *small* fraction moving the CPU keep-index wins by
+skipping the rest (the demos' regime — a mostly-dormant population keeps for
+~nothing). They cross at a clean fraction **f\* ≈ 16 % (262k) / 12–14 % (1 M)**
+moving — and **f\* drops with N** (the serial keep pass scales worse than the
+parallel build).
+
+### 7.4 Adaptive keep↔GPU with hysteresis
+
+Since keep-cost is ~linear in the moving fraction and the GPU rebuild is flat, an
+**adaptive** policy — keep below f\*, GPU rebuild above, with a **hysteresis**
+dead-band to avoid thrashing at the boundary — beats *both* pure strategies. On a
+120-frame wave whose moving fraction ramps 0→1→0 (1 M points): adaptive **1020 ms**
+vs pure-GPU 1099 vs pure-keep 5227. Near f\* the two costs are ~equal, so the
+damage of a needless flip is the **switch itself** (rebuild warm-up, frame-time
+variance) — a ±25 %-of-f\* dead-band roughly **halves the switch count** when the
+load hovers at f\* (110 → 64 over 200 noisy frames) at ~equal raw cost.
+
+### 7.5 Cache-locality: `Tree3::compact()`
+
+A one-pass DFS pre-order reorder of the node arena (a node lands adjacent to its
+first child; freed slots reclaimed) — a pure layout change (identical
+cull/knn/handle results, brute-force-gated). On a churned keep-index tree it buys
+a steady **~1.16× cull** (100k: 3.66→3.13 µs/query; 200k: 5.50→4.74), not the
+literature's 26–300 % (that was pathological / other structures). One pass,
+amortises over many frames; best before a query-heavy phase after churn.
+
+### 7.6 The honest negatives (what we did NOT do, and why)
+
+- **Uniform-density collision wants a grid, not a BVH.** A hash grid is
+  O(1)-per-cell and already the right broad-phase for a uniform storm; a BVH's
+  edge is *non-uniform* density or *culling by shape* (ray / frustum / sphere).
+  So the GPU LBVH build was **not** retrofitted into the uniform-collision demo.
+- **`compact()` was not wired into the demos** — their per-frame cull is a small
+  slice, so ~1.16× of it isn't worth the periodic compaction hitch.
+- **The GPU wins the query, but not always the frame.** A GPU broad-phase *kernel*
+  is ~100–400× the serial CPU cull, but a *moving* cloud must rebuild the index —
+  which is where §7.3's fraction-dependent crossover, not the kernel speed,
+  decides CPU-keep vs GPU-rebuild.

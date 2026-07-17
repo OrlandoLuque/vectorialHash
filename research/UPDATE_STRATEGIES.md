@@ -215,6 +215,19 @@ on a short list), so the downside risk is tiny.
    strategy choice. `il = 30` is 10× faster than `il = 3` at the same pop.
    Tuning that is a separate axis — the strategy gains compound on top.
 
+5. **At scale, rebuild can beat keep — including on the GPU (2026-07-17).** The
+   keep/`Lca` story above holds for a *modest moving fraction* (the critters'
+   regime, where most items stay in their leaf). Push to a *mostly-moving* set and
+   a from-scratch **rebuild** overtakes the serial `update_ref` maintain — and the
+   rebuild can be the **GPU**: a whole LBVH (Morton → radix → Karras → atomic
+   refit) builds **GPU-resident in ~8 ms/frame at 1 M**, verified by traversing the
+   GPU-built tree vs brute force. Because keep *skips the unmoved*, keep-cost is
+   ~linear in the moving fraction while the GPU rebuild is flat, so they cross at
+   **f\* ≈ 12–16 % moving** (dropping with N). An **adaptive** switch — keep below
+   f\*, GPU rebuild above, with a **hysteresis** dead-band to avoid thrashing —
+   beats both pure strategies and roughly halves the mode switches near f\*. Full
+   numbers + methodology in [BENCHMARKS.md §7](BENCHMARKS.md).
+
 ### Caveats and what we did NOT measure
 
 - All numbers are `--no-attack` (pure movement). The full game-like
