@@ -14,7 +14,7 @@ path or the template bank, and refresh the tables.
 | [4](#results-4--vh-bench-fallback-granularity-as-fallback-aggregation) | `vh bench-fallback`: granularity-as-fallback aggregation | The aggregated fallback is **exact**, costs 0.59 MB vs 1.70 MB of full precomputation, ~3× the no-template baseline. Memory/precompute knob. |
 | [5](#results-5--vh-bench-scale-figureleftrightgrid-scale-equivalence) | `vh bench-scale`: figure↔grid scale equivalence | One canonical set serves many query scales: 25× less memory, 10× faster generation; cull cost equals direct at low factors, ~2.5× at factor 8. |
 | [6](#results-6--headless-critters-a-full-dynamic-workload) | `critters_headless`: full dynamic workload (updates + culls + churn) | Quadtree ahead 10–35% even on dynamic ops (depth halves `locate`); hysteresis helps the binary tree; `item_limit` is the dominant knob; deterministic cross-structure runs with zero cull mismatches. |
-| [7](#results-7--gpu-sort-the-on-gpu-lbvh-build-and-the-keeprebuild-crossover-2026-07-17) | GPU: radix sort · on-GPU LBVH build · keep↔rebuild crossover + adaptive · quantised nodes | GPU radix **5–11× the CPU at scale** with a hierarchical scan (bitonic was ~2× slower); a whole LBVH builds **GPU-resident in ~4.4 ms/frame at 1 M** (verified by traversal-vs-brute); moving-data crossover at **f\* ≈ 30 % → 2.8 % moving** as N grows 262k→4M; adaptive-with-hysteresis beats both pure strategies; **quantised u16 BVH nodes are 1.6× smaller and EXACT** (footprint, not latency). |
+| [7](#results-7--gpu-sort-the-on-gpu-lbvh-build-and-the-keeprebuild-crossover-2026-07-17) | GPU: radix sort · on-GPU LBVH build · keep↔rebuild crossover + adaptive · quantised nodes | GPU radix **8–17× the CPU at scale** (hierarchical scan + 8-bit/4-pass width; bitonic was ~2× slower); a whole LBVH builds **GPU-resident in ~4.4 ms/frame at 1 M** (verified by traversal-vs-brute); moving-data crossover at **f\* ≈ 30 % → 2.8 % moving** as N grows 262k→4M; adaptive-with-hysteresis beats both pure strategies; **quantised u16 BVH nodes are 1.6× smaller and EXACT** (footprint, not latency). |
 
 ## Environment
 
@@ -384,7 +384,7 @@ live in the kit (`vectorial-hash-demos/examples/`): `gpu_spatial_bench`,
 `gpu_sort_bench`, `gpu_radix_bench`, `gpu_lbvh_build_bench`; and the library
 examples `compact_bench` and `compressed_bvh_bench`.
 
-### 7.1 GPU sort of Morton codes — bitonic (negative) → radix (5–11× the CPU)
+### 7.1 GPU sort of Morton codes — bitonic (negative) → radix (8–17× the CPU)
 
 The on-GPU LBVH build needs the Morton-code **sort** on the GPU. Two attempts:
 
@@ -412,9 +412,24 @@ The on-GPU LBVH build needs the Morton-code **sort** on the GPU. Two attempts:
   So **1 M went 6.3 → 2.3 ms and 4 M 24.5 → 4.3 ms** (small N pays a little for the
   extra scan passes — 262 k 1.09 → 1.68 ms — but that is the fast regime anyway).
   Lesson (recurs throughout): the bottleneck was a **serial section**, not the
-  algorithm — Amdahl in miniature. The remaining lever is a single-pass
-  decoupled-lookback (Onesweep) scan; the hierarchical version already captures most
-  of it.
+  algorithm — Amdahl in miniature.
+- **Wider digit → fewer global passes** (the Onesweep direction). Sorting 32-bit
+  keys **8 bits at a time = 4 passes** instead of **4 bits = 8 passes** halves the
+  global histogram+scatter round-trips, at the cost of a 256-bucket (vs 16) histogram
+  and scan per pass. Measured — it wins across the board:
+
+  | keys | 4-bit ×8 | 8-bit ×4 | 8-bit vs 4-bit | 8-bit vs CPU |
+  | --- | --- | --- | --- | --- |
+  | 262 k | 1.70 ms | **0.93 ms** | 1.83× | 2.75× |
+  | 1 M | 2.20 ms | **1.30 ms** | 1.70× | **8.11×** |
+  | 4 M | 4.35 ms | **2.79 ms** | 1.56× | **16.78×** |
+
+  So the GPU radix is now **8–17× the CPU** at scale. A *true* single-pass **Onesweep**
+  (one decoupled-lookback scan) would cut it further, but it needs guaranteed
+  inter-workgroup **forward progress**, which WebGPU/WGSL does **not** promise (it can
+  deadlock) — so 8-bit/4-pass is the *portable* step in that direction, and the honest
+  ceiling for a spec-clean WebGPU radix. (Follow-on: fold the 8-bit width into the
+  build's key-value radix, §7.2, to shave its sort stage.)
 
 ### 7.2 A whole LBVH built on the GPU — Morton → radix → Karras → refit
 
