@@ -534,10 +534,35 @@ does not move the critical path.
 cache/VRAM (it matters for the GPU build against WebGPU's
 `maxStorageBufferBindingSize`, and for huge static worlds) — **not** a cull-speed
 lever for the binary layout, and it is **exact**. The literature's *latency* win
-comes from **wide (8-ary) compressed nodes**: one cache line = one node, all 8
+comes from **wide (8-ary) compressed nodes**: one node holds 8 children, all 8
 child boxes tested with SIMD, which amortises the pointer-chase and vectorises the
-box tests. That wide-node layout — not quantisation per se — is the real next step
-if latency (rather than footprint) is the goal.
+box tests. That wide-node layout — not quantisation per se — is where the latency
+win lives.
+
+**And that wide node, measured (`wide_bvh_bench`).** An 8-ary BVH with each node's
+8 child boxes stored **SoA** (`lo[axis][8]`, `hi[axis][8]`) so the sphere-vs-8-boxes
+test is a fixed 8-wide loop LLVM **auto-vectorises to AVX** (`-C target-cpu=native`);
+leaves hold ≤8 points, tested exactly ⇒ verified **== brute force**. Three BVHs over
+the same clumpy cloud (RTX 4080 SUPER box, min-of-8):
+
+| N | bin-f32 | wide8-f32 | wide8-u16 | nodes/query (bin→wide) | arena (bin→wide-u16) |
+| --- | --- | --- | --- | --- | --- |
+| 200 k | 15.1 µs | **8.8 µs (1.71×)** | 9.8 µs (1.53×) | 1460 → 42 (35×↓) | 12.8 → 1.5 MB |
+| 1 M | 88.9 µs | **41.2 µs (2.16×)** | 45.1 µs (1.97×) | 6566 → 196 (34×↓) | 64 → 9.4 MB |
+| 4 M | 626 µs | **283 µs (2.21×)** | 298 µs (2.10×) | 24427 → 1117 (22×↓) | 256 → 59 MB |
+
+So the wide node is a **real ~2× latency win** (growing with N) where the *binary*
+u16 node was only a wash — the difference is going **wide**, not the quantisation:
+the 8:1 fan-out visits **~30× fewer nodes** (shallow tree, far fewer pointer-chases)
+and the 8-box test vectorises. The arena also shrinks sharply (points batch into
+≤8-point leaves ⇒ ~64× fewer internal nodes): 1 M drops **64 → 13 MB** (f32) / **9.4
+MB** (u16). Quantising the *wide* node to u16 costs the same small dequantise offset
+as the binary case, yet stays ~2× over binary **and** ~1.4× smaller than wide-f32 —
+so **wide8-u16 is the best footprint-and-speed point**, and this is the layout to
+reach for if a static / query-heavy BVH graduates into the kit (the GPU LBVH build
+of §7.2 is its natural producer). This closes the compressed-node thread: *the
+literature's latency win is real, and it is the wide SoA node — measured, not
+assumed.*
 
 ### 7.7 The honest negatives (what we did NOT do, and why)
 
