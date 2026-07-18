@@ -14,7 +14,7 @@ path or the template bank, and refresh the tables.
 | [4](#results-4--vh-bench-fallback-granularity-as-fallback-aggregation) | `vh bench-fallback`: granularity-as-fallback aggregation | The aggregated fallback is **exact**, costs 0.59 MB vs 1.70 MB of full precomputation, ~3× the no-template baseline. Memory/precompute knob. |
 | [5](#results-5--vh-bench-scale-figureleftrightgrid-scale-equivalence) | `vh bench-scale`: figure↔grid scale equivalence | One canonical set serves many query scales: 25× less memory, 10× faster generation; cull cost equals direct at low factors, ~2.5× at factor 8. |
 | [6](#results-6--headless-critters-a-full-dynamic-workload) | `critters_headless`: full dynamic workload (updates + culls + churn) | Quadtree ahead 10–35% even on dynamic ops (depth halves `locate`); hysteresis helps the binary tree; `item_limit` is the dominant knob; deterministic cross-structure runs with zero cull mismatches. |
-| [7](#results-7--gpu-sort-the-on-gpu-lbvh-build-and-the-keeprebuild-crossover-2026-07-17) | GPU: radix sort · on-GPU LBVH build · keep↔rebuild crossover + adaptive | GPU radix ~2× the CPU (bitonic was ~2× slower); a whole LBVH builds **GPU-resident in ~8 ms/frame at 1 M** (verified by traversal-vs-brute); moving-data crossover at **f\* ≈ 12–16 % moving** (drops with N); adaptive-with-hysteresis beats both pure strategies. |
+| [7](#results-7--gpu-sort-the-on-gpu-lbvh-build-and-the-keeprebuild-crossover-2026-07-17) | GPU: radix sort · on-GPU LBVH build · keep↔rebuild crossover + adaptive · quantised nodes | GPU radix **5–11× the CPU at scale** with a hierarchical scan (bitonic was ~2× slower); a whole LBVH builds **GPU-resident in ~4.4 ms/frame at 1 M** (verified by traversal-vs-brute); moving-data crossover at **f\* ≈ 30 % → 2.8 % moving** as N grows 262k→4M; adaptive-with-hysteresis beats both pure strategies; **quantised u16 BVH nodes are 1.6× smaller and EXACT** (footprint, not latency). |
 
 ## Environment
 
@@ -382,9 +382,9 @@ results are **verified against a CPU reference** (a build/sort is only reported
 once its output matches brute force / a CPU sort exactly). Reproducible benches
 live in the kit (`vectorial-hash-demos/examples/`): `gpu_spatial_bench`,
 `gpu_sort_bench`, `gpu_radix_bench`, `gpu_lbvh_build_bench`; and the library
-`compact_bench`.
+examples `compact_bench` and `compressed_bvh_bench`.
 
-### 7.1 GPU sort of Morton codes — bitonic (negative) → radix (~2× the CPU)
+### 7.1 GPU sort of Morton codes — bitonic (negative) → radix (5–11× the CPU)
 
 The on-GPU LBVH build needs the Morton-code **sort** on the GPU. Two attempts:
 
@@ -394,19 +394,27 @@ The on-GPU LBVH build needs the Morton-code **sort** on the GPU. Two attempts:
   primitive is a radix sort.
 - **Stable 4-bit LSD radix**, all-GPU (`gpu_radix_bench`) — 3 kernels/pass
   (per-tile histogram → exclusive scan → stable local-rank scatter), ping-pong,
-  8 passes, no CPU in the loop. Verified == CPU at every size. The scan is the
-  crux: a single-workgroup serial scan left it only **at parity** with the CPU;
-  parallelising it **16-way** (one thread per digit) put it clear:
+  8 passes, no CPU in the loop. Verified == CPU at every size. **The scan was the
+  whole story** — three iterations, each a lesson in where the real cost hid:
+  1. a **single-workgroup serial** scan left it only *at parity* with the CPU;
+  2. parallelising it **16-way** (one thread per digit) put it ~2× clear
+     (262 k 1.09 ms/2.37× · 1 M 6.31 ms/1.77× · 4 M 24.51 ms/1.97×);
+  3. a **hierarchical multi-workgroup** scan (reduce per block of tiles → scan the
+     blocks → add back) removed the bottleneck that only bit at scale — the per-digit
+     tile prefix is now parallel over blocks, not one workgroup walking every tile:
 
   | keys | GPU radix | CPU `sort_unstable` | speedup |
   | --- | --- | --- | --- |
-  | 262 k | 1.09 ms | 2.58 ms | **2.37×** |
-  | 1 M | 6.31 ms | 11.16 ms | **1.77×** |
-  | 4 M | 24.51 ms | 48.38 ms | **1.97×** |
+  | 262 k | 1.68 ms | 2.53 ms | **1.51×** |
+  | 1 M | 2.20 ms | 10.47 ms | **4.76×** |
+  | 4 M | 4.32 ms | 45.77 ms | **10.59×** |
 
+  So **1 M went 6.3 → 2.3 ms and 4 M 24.5 → 4.3 ms** (small N pays a little for the
+  extra scan passes — 262 k 1.09 → 1.68 ms — but that is the fast regime anyway).
   Lesson (recurs throughout): the bottleneck was a **serial section**, not the
-  algorithm — Amdahl in miniature. A multi-workgroup decoupled-lookback (Onesweep)
-  scan would scale it further.
+  algorithm — Amdahl in miniature. The remaining lever is a single-pass
+  decoupled-lookback (Onesweep) scan; the hierarchical version already captures most
+  of it.
 
 ### 7.2 A whole LBVH built on the GPU — Morton → radix → Karras → refit
 
@@ -421,11 +429,13 @@ hierarchy *and* the refit AABBs are correct), first try, at every size:
 
 | points | build/frame (min of 7) | throughput |
 | --- | --- | --- |
-| 262 k | 1.69 ms | 155 Mpts/s |
-| 1 M | 8.39 ms | 125 Mpts/s |
-| 4 M | 36.3 ms | 116 Mpts/s |
+| 262 k | 2.28 ms | 115 Mpts/s |
+| 1 M | **4.40 ms** | 239 Mpts/s |
+| 4 M | 12.98 ms | 308 Mpts/s |
 
-So a **1 M-point BVH rebuilds on the GPU in ~8 ms/frame**. (The atomic refit
+So a **1 M-point BVH rebuilds on the GPU in ~4.4 ms/frame** — down from 8.4 ms once
+the radix scan went hierarchical (§7.1); small N pays a little for the extra scan
+passes, big N pulls far ahead (4 M 36.3 → 13.0 ms, 308 Mpts/s). (The atomic refit
 relies on the platform's atomic ordering for cross-workgroup visibility — correct
 on this NVIDIA hardware per the verify; a level-by-level refit would be
 spec-portable.)
@@ -438,30 +448,35 @@ that it **skips items that didn't move**, so its cost is ~linear in the *moving
 fraction* while the GPU rebuild is flat. Measured on the same points (keep at its
 best case — tiny jitter, ~no relocations):
 
-| N | GPU rebuild | CPU keep (best) | CPU rebuild (`bulk_load_par`) |
-| --- | --- | --- | --- |
-| 262 k | 1.7 ms | 8.4 ms | 37.9 ms |
-| 1 M | 9.3 ms | 80 ms | 130 ms |
-| 4 M | 35 ms | 517 ms | 834 ms |
+| N | GPU rebuild | CPU keep (all, best) | CPU rebuild (`bulk_load_par`) | GPU beats keep | f\* moving |
+| --- | --- | --- | --- | --- | --- |
+| 262 k | 2.28 ms | 5.69 ms | 30.71 ms | 2.5× | **29.9 %** |
+| 1 M | **4.40 ms** | 48.55 ms | 132.81 ms | 11.0× | **7.6 %** |
+| 4 M | 12.98 ms | 451.52 ms | 681.95 ms | 34.8× | **2.8 %** |
 
-The rule is by **moving fraction**, not just N: with *most* of the cloud moving
-the parallel GPU rebuild wins (a serial maintain-*all* pass loses to a parallel
-from-scratch build); with a *small* fraction moving the CPU keep-index wins by
-skipping the rest (the demos' regime — a mostly-dormant population keeps for
-~nothing). They cross at a clean fraction **f\* ≈ 16 % (262k) / 12–14 % (1 M)**
-moving — and **f\* drops with N** (the serial keep pass scales worse than the
-parallel build).
+(These are the post-hierarchical-scan build numbers; the GPU column is §7.2. "Keep"
+here moves *all* N with tiny jitter — its **best** case; real motion with
+relocations only grows it.) The rule is by **moving fraction**, not just N: with
+*most* of the cloud moving the parallel GPU rebuild wins (a serial maintain-*all*
+pass loses to a parallel from-scratch build); with a *small* fraction moving the CPU
+keep-index wins by skipping the rest (the demos' regime — a mostly-dormant
+population keeps for ~nothing). They cross at **f\* ≈ 30 % (262k) → 7.6 % (1 M) →
+2.8 % (4 M)** moving — and **f\* drops sharply with N**: the serial keep pass scales
+~linearly while the parallel GPU build stays near-flat, so the bigger the world the
+less motion it takes to justify rebuilding on the GPU.
 
 ### 7.4 Adaptive keep↔GPU with hysteresis
 
 Since keep-cost is ~linear in the moving fraction and the GPU rebuild is flat, an
 **adaptive** policy — keep below f\*, GPU rebuild above, with a **hysteresis**
 dead-band to avoid thrashing at the boundary — beats *both* pure strategies. On a
-120-frame wave whose moving fraction ramps 0→1→0 (1 M points): adaptive **1020 ms**
-vs pure-GPU 1099 vs pure-keep 5227. Near f\* the two costs are ~equal, so the
-damage of a needless flip is the **switch itself** (rebuild warm-up, frame-time
-variance) — a ±25 %-of-f\* dead-band roughly **halves the switch count** when the
-load hovers at f\* (110 → 64 over 200 noisy frames) at ~equal raw cost.
+120-frame wave whose moving fraction ramps 0→1→0 (1 M points): adaptive **504 ms**
+vs pure-GPU 527 vs pure-keep 4163. (The margin over pure-GPU is small here because
+a 0→1→0 ramp spends most frames *above* f\*=7.6 %, where GPU already wins; adaptive's
+edge is the low-fraction frames it hands back to keep.) Near f\* the two costs are
+~equal, so the damage of a needless flip is the **switch itself** (rebuild warm-up,
+frame-time variance) — a ±25 %-of-f\* dead-band roughly **halves the switch count**
+when the load hovers at f\* (**110 → 64** over 200 noisy frames) at ~equal raw cost.
 
 ### 7.5 Cache-locality: `Tree3::compact()`
 
@@ -472,7 +487,59 @@ a steady **~1.16× cull** (100k: 3.66→3.13 µs/query; 200k: 5.50→4.74), not 
 literature's 26–300 % (that was pathological / other structures). One pass,
 amortises over many frames; best before a query-heavy phase after churn.
 
-### 7.6 The honest negatives (what we did NOT do, and why)
+### 7.6 Compressed (quantised) BVH nodes — exact, and a footprint (not latency) win
+
+A BVH node stores an AABB (2 corners × 3 axes = 6 numbers) plus 2 child indices.
+The memory-wall lever the literature names is **quantising the box**: instead of a
+32-bit float per coordinate (absolute world position), store each coordinate as a
+**u16 index into a 65 536-step grid spanning the root box** —
+`q = round((coord − root_min) / root_span × 65535)`. Node size drops from **32 B**
+(6×f32 + 2×u32) to **20 B** (6×u16 + 2×u32) = **1.6× smaller**.
+
+**The exactness argument (the key point).** A u16 grid is coarse (step =
+root_span/65535 ≈ 0.016 units for a 1024-wide scene), so a quantised box does not
+match the true box. Used naïvely it could *shrink* a box and **miss** a point — a
+wrong answer. Two moves make it **provably exact**:
+1. **Round outward** — min to the grid `floor`, max to the grid `ceil` — so the
+   dequantised box is always a **superset** of the true box. It never shrinks ⇒
+   never misses; at worst it is slightly too big ⇒ a few extra (empty) node visits.
+2. **Exact leaf test** — the quantised boxes decide only *which subtrees to
+   descend*; the actual points live in a separate f32 array, and the leaf tests the
+   query against the **exact point**. So quantisation changes only *how many nodes
+   you visit*, never *what you return*.
+
+⇒ The quantised cull is **bit-for-bit identical to brute force** (verified over
+random spheres at 200k / 1 M / 4 M). *This corrects an earlier hasty claim that
+quantised AABBs "break the exact-query contract" — they do not, given outward
+rounding + exact leaf tests. The conservative boxes cost traversal, never accuracy.*
+
+Measured (RTX 4080 SUPER, min-of-8, a clumpy 3D cloud so the tree is non-trivial;
+`vectorial-hash/examples/compressed_bvh_bench.rs`):
+
+| N | node (full → quant) | arena (full → quant) | over-visit | cull full → quant |
+| --- | --- | --- | --- | --- |
+| 200 k | 32 → 20 B (1.6×) | 12.8 → 8.0 MB | **0.0 %** | 18.4 → 18.6 µs (1.01× slower) |
+| 1 M | 32 → 20 B (1.6×) | 64 → 40 MB | **0.0 %** | 206.6 → 204.4 µs (1.01× faster) |
+| 4 M | 32 → 20 B (1.6×) | 256 → 160 MB | **0.0 %** | 778 → 847 µs (1.09× slower) |
+
+Two readings. **(a)** Over-visit is **0 %**: at u16 the ~0.016-unit outward rounding
+is far below the clump scale, so the conservative boxes are traversal-identical to
+the exact ones — the footprint drop is genuinely free of traversal cost. **(b)**
+Cull latency is a **wash** (±≤10 %, noise-dominated): the per-node dequantise (a
+float mul-add × 3 axes) offsets the smaller-node cache win, and a *binary* BVH
+traversal is **pointer-/branch-bound, not bandwidth-bound**, so shrinking the node
+does not move the critical path.
+
+**Verdict.** Quantisation is a **footprint** lever — fit ~1.6× more BVH in
+cache/VRAM (it matters for the GPU build against WebGPU's
+`maxStorageBufferBindingSize`, and for huge static worlds) — **not** a cull-speed
+lever for the binary layout, and it is **exact**. The literature's *latency* win
+comes from **wide (8-ary) compressed nodes**: one cache line = one node, all 8
+child boxes tested with SIMD, which amortises the pointer-chase and vectorises the
+box tests. That wide-node layout — not quantisation per se — is the real next step
+if latency (rather than footprint) is the goal.
+
+### 7.7 The honest negatives (what we did NOT do, and why)
 
 - **Uniform-density collision wants a grid, not a BVH.** A hash grid is
   O(1)-per-cell and already the right broad-phase for a uniform storm; a BVH's
