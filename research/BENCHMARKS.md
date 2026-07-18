@@ -442,15 +442,18 @@ arrive unions the two boxes). Verified end-to-end by **traversing the GPU-built
 BVH on the CPU and comparing to brute force** over random spheres (a pass ⇒ the
 hierarchy *and* the refit AABBs are correct), first try, at every size:
 
-| points | build/frame (min of 7) | throughput |
+| points | build/frame (min of 7), 4-bit → 8-bit sort | throughput |
 | --- | --- | --- |
-| 262 k | 2.28 ms | 115 Mpts/s |
-| 1 M | **4.40 ms** | 239 Mpts/s |
-| 4 M | 12.98 ms | 308 Mpts/s |
+| 262 k | 2.28 → **1.58 ms** | 166 Mpts/s |
+| 1 M | 4.40 → **3.7 ms** | 273 Mpts/s |
+| 4 M | 12.98 → ~14 ms (flat) | 283 Mpts/s |
 
-So a **1 M-point BVH rebuilds on the GPU in ~4.4 ms/frame** — down from 8.4 ms once
-the radix scan went hierarchical (§7.1); small N pays a little for the extra scan
-passes, big N pulls far ahead (4 M 36.3 → 13.0 ms, 308 Mpts/s). (The atomic refit
+So a **1 M-point BVH rebuilds on the GPU in ~3.7 ms/frame** — 8.4 ms → 4.4 ms once
+the radix scan went hierarchical (§7.1), then the build's own key-value radix took
+the **8-bit / 4-pass** width (§7.1). The width helps where the *sort* is a big slice
+of the build (262 k **1.4×**, 1 M **1.2×**); at 4 M the sort is a smaller fraction
+(Karras + refit dominate) and the 256-bucket scan overhead makes it a **wash** — an
+honest, size-dependent win, verified == brute at every size. (The atomic refit
 relies on the platform's atomic ordering for cross-workgroup visibility — correct
 on this NVIDIA hardware per the verify; a level-by-level refit would be
 spec-portable.)
