@@ -576,11 +576,16 @@ and the 8-box test vectorises. The arena also shrinks sharply (points batch into
 ≤8-point leaves ⇒ ~64× fewer internal nodes): 1 M drops **64 → 13 MB** (f32) / **9.4
 MB** (u16). Quantising the *wide* node to u16 costs the same small dequantise offset
 as the binary case, yet stays ~2× over binary **and** ~1.4× smaller than wide-f32 —
-so **wide8-u16 is the best footprint-and-speed point**, and this is the layout to
-reach for if a static / query-heavy BVH graduates into the kit (the GPU LBVH build
-of §7.2 is its natural producer). This closes the compressed-node thread: *the
-literature's latency win is real, and it is the wide SoA node — measured, not
-assumed.*
+so **wide8-u16 is the best footprint-and-speed point**. **But the 2× is over a
+*strawman*** — reference-checked (2026-07-19) the bench also culls the same cloud with
+the kit's **shipping `Tree3` / `Octree3`**: wide8-u16 is only **~1.0× vs Tree3** (200k
+1.03× · 1 M **0.99×**, Tree3 *faster*) and **~1.05× vs Octree3**. The kit's tuned arena
+descent already sits at the wide node; the 2× was purely over a naive pointer-BVH. So
+the honest verdict is *not* "graduate a wide BVH into the kit" — the win evaporates
+against the real cull; the 8-ary SoA layout's home stays the **GPU LBVH** (§7.2), where
+the alternative is a naive kernel. The compressed-node thread's real lesson: *the
+literature's latency win is real over a naive BVH, but the kit's cull already captures
+it — measured, not assumed, on both sides.*
 
 ### 7.7 The honest negatives (what we did NOT do, and why)
 
