@@ -425,11 +425,19 @@ The on-GPU LBVH build needs the Morton-code **sort** on the GPU. Two attempts:
   | 4 M | 4.35 ms | **2.79 ms** | 1.56× | **16.78×** |
 
   So the GPU radix is now **8–17× the CPU** at scale. A *true* single-pass **Onesweep**
-  (one decoupled-lookback scan) would cut it further, but it needs guaranteed
-  inter-workgroup **forward progress**, which WebGPU/WGSL does **not** promise (it can
-  deadlock) — so 8-bit/4-pass is the *portable* step in that direction, and the honest
-  ceiling for a spec-clean WebGPU radix. (Follow-on: fold the 8-bit width into the
-  build's key-value radix, §7.2, to shave its sort stage.)
+  (one decoupled-lookback scan) would cut it further — **and it was attempted, and
+  measured un-implementable in portable WGSL** (`gpu_onesweep_scan_bench`). The
+  look-back publishes a per-tile aggregate then a full prefix and spins on
+  predecessors' flags; it needs a **device-scope** acquire/release between one spinning
+  thread and other workgroups (CUDA's `__threadfence()` + `volatile`). WGSL has **no
+  device fence** — its only ordering primitive `storageBarrier()` is **workgroup-scope
+  and must be called uniformly**, so it cannot order a single look-back thread against
+  other workgroups. Measured on native NVIDIA (RTX 4080 SUPER): the scan returns a
+  **wrong** prefix — a tile reads a predecessor's flag *before* that predecessor's
+  aggregate is visible — with **no** spin-timeout, i.e. it is a **memory-ordering**
+  wall, not a forward-progress one (refining the earlier wording). So **8-bit/4-pass is
+  the honest portable ceiling** for a spec-clean WebGPU radix. (Follow-on done: the
+  8-bit width is folded into the build's key-value radix, §7.2.)
 
 ### 7.2 A whole LBVH built on the GPU — Morton → radix → Karras → refit
 
