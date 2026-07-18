@@ -14,7 +14,7 @@ path or the template bank, and refresh the tables.
 | [4](#results-4--vh-bench-fallback-granularity-as-fallback-aggregation) | `vh bench-fallback`: granularity-as-fallback aggregation | The aggregated fallback is **exact**, costs 0.59 MB vs 1.70 MB of full precomputation, ~3× the no-template baseline. Memory/precompute knob. |
 | [5](#results-5--vh-bench-scale-figureleftrightgrid-scale-equivalence) | `vh bench-scale`: figure↔grid scale equivalence | One canonical set serves many query scales: 25× less memory, 10× faster generation; cull cost equals direct at low factors, ~2.5× at factor 8. |
 | [6](#results-6--headless-critters-a-full-dynamic-workload) | `critters_headless`: full dynamic workload (updates + culls + churn) | Quadtree ahead 10–35% even on dynamic ops (depth halves `locate`); hysteresis helps the binary tree; `item_limit` is the dominant knob; deterministic cross-structure runs with zero cull mismatches. |
-| [7](#results-7--gpu-sort-the-on-gpu-lbvh-build-and-the-keeprebuild-crossover-2026-07-17) | GPU: radix sort · on-GPU LBVH build · keep↔rebuild crossover + adaptive · quantised nodes | GPU radix **8–17× the CPU at scale** (hierarchical scan + 8-bit/4-pass width; bitonic was ~2× slower); a whole LBVH builds **GPU-resident in ~4.4 ms/frame at 1 M** (verified by traversal-vs-brute); moving-data crossover at **f\* ≈ 30 % → 2.8 % moving** as N grows 262k→4M; adaptive-with-hysteresis beats both pure strategies; **quantised u16 BVH nodes are 1.6× smaller and EXACT** (footprint, not latency). |
+| [7](#results-7--gpu-sort-the-on-gpu-lbvh-build-and-the-keeprebuild-crossover-2026-07-17) | GPU: radix sort · on-GPU LBVH build · keep↔rebuild crossover + adaptive · quantised nodes | GPU radix **8–23× the CPU at scale** (hierarchical scan + 8-bit/4-pass width; bitonic was ~2× slower); a whole LBVH builds **GPU-resident in ~4.4 ms/frame at 1 M** (verified by traversal-vs-brute); moving-data crossover at **f\* ≈ 30 % → 2.8 % moving** as N grows 262k→4M; adaptive-with-hysteresis beats both pure strategies; **quantised u16 BVH nodes are 1.6× smaller and EXACT** (footprint, not latency). |
 
 ## Environment
 
@@ -384,7 +384,7 @@ live in the kit (`vectorial-hash-demos/examples/`): `gpu_spatial_bench`,
 `gpu_sort_bench`, `gpu_radix_bench`, `gpu_lbvh_build_bench`; and the library
 examples `compact_bench` and `compressed_bvh_bench`.
 
-### 7.1 GPU sort of Morton codes — bitonic (negative) → radix (8–17× the CPU)
+### 7.1 GPU sort of Morton codes — bitonic (negative) → radix (8–23× the CPU)
 
 The on-GPU LBVH build needs the Morton-code **sort** on the GPU. Two attempts:
 
@@ -423,8 +423,14 @@ The on-GPU LBVH build needs the Morton-code **sort** on the GPU. Two attempts:
   | 262 k | 1.70 ms | **0.93 ms** | 1.83× | 2.75× |
   | 1 M | 2.20 ms | **1.30 ms** | 1.70× | **8.11×** |
   | 4 M | 4.35 ms | **2.79 ms** | 1.56× | **16.78×** |
+  | 8 M | 8.13 ms | **5.42 ms** | 1.50× | **22.57×** |
+  | 16 M | 16.28 ms | **12.15 ms** | 1.34× | 17.23× |
 
-  So the GPU radix is now **8–17× the CPU** at scale. A *true* single-pass **Onesweep**
+  So the GPU radix is **8–23× the CPU** at scale, peaking ~**22.6× at 8 M** — the
+  8-bit width holds its ~1.3–1.5× edge over 4-bit throughout (the 256-bucket scan
+  overhead only slowly erodes it), and the GPU-vs-CPU ratio softens past 8 M as the
+  sort turns bandwidth-bound while `sort_unstable` scales sub-linearly. A *true*
+  single-pass **Onesweep**
   (one decoupled-lookback scan) would cut it further — **and it was attempted, and
   measured un-implementable in portable WGSL** (`gpu_onesweep_scan_bench`). The
   look-back publishes a per-tile aggregate then a full prefix and spins on
