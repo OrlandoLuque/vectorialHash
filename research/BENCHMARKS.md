@@ -15,6 +15,7 @@ path or the template bank, and refresh the tables.
 | [5](#results-5--vh-bench-scale-figureleftrightgrid-scale-equivalence) | `vh bench-scale`: figure↔grid scale equivalence | One canonical set serves many query scales: 25× less memory, 10× faster generation; cull cost equals direct at low factors, ~2.5× at factor 8. |
 | [6](#results-6--headless-critters-a-full-dynamic-workload) | `critters_headless`: full dynamic workload (updates + culls + churn) | Quadtree ahead 10–35% even on dynamic ops (depth halves `locate`); hysteresis helps the binary tree; `item_limit` is the dominant knob; deterministic cross-structure runs with zero cull mismatches. |
 | [7](#results-7--gpu-sort-the-on-gpu-lbvh-build-and-the-keeprebuild-crossover-2026-07-17) | GPU: radix sort · on-GPU LBVH build · keep↔rebuild crossover + adaptive · quantised nodes | GPU radix **8–23× the CPU at scale** (hierarchical scan + 8-bit/4-pass width; bitonic was ~2× slower); a whole LBVH builds **GPU-resident in ~4.4 ms/frame at 1 M** (verified by traversal-vs-brute); moving-data crossover at **f\* ≈ 30 % → 2.8 % moving** as N grows 262k→4M; adaptive-with-hysteresis beats both pure strategies; **quantised u16 BVH nodes are 1.6× smaller and EXACT** (footprint, not latency). |
+| [8](#results-8--median-vs-midpoint-and-three-application-workloads-2026-07-27) | Median vs midpoint split (query + parallel build) · frustum index-vs-scan crossover · SPH neighbour search · static k-NN | Median split culls **3.06×** and k-NNs **1.65×** the midpoint tree on clustered data, and parallelises **3.3× vs 1.7-2.0×** (equal-count forks balance by construction); a frustum index only beats a linear scan **above ~1000 agents** (7.1× at 40k) while the exact LoS narrowphase dominates at scale; in SPH the **query IS the simulation cost** and keep-index maintain is ~3.5× cheaper than any rebuild. |
 
 ## Environment
 
@@ -613,3 +614,114 @@ it — measured, not assumed, on both sides.*
   is ~100–400× the serial CPU cull, but a *moving* cloud must rebuild the index —
   which is where §7.3's fraction-dependent crossover, not the kernel speed,
   decides CPU-keep vs GPU-rebuild.
+
+
+## Results 8 — median vs midpoint, and three application workloads (2026-07-27)
+
+Four measurements taken while building three application demos in the kit
+(`fluid_wgpu`, `pointcloud_wgpu`, `stealth_wgpu`). They are here rather than in the kit
+because each is a *methodology* result — the kit keeps only the conclusion.
+
+Environment as §7 (Windows 10, RTX 4080 SUPER box, 16 threads, `--release`).
+
+### 8.1 The median split: worse build, better query — and the better parallel build
+
+`KdTree3` splits at the point-count **median**; `Tree3`/`Octree3` split at the spatial
+**midpoint**. 200 000 points, min-of-5, `examples/kdtree3_bench`:
+
+| | build serial | build par (16 thr) | speed-up | cull ×64 | knn k=16 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `KdTree3` uniform | 20.47 ms | **6.29 ms** | **3.25×** | 4.91 ms | 2.36 ms |
+| `KdTree3` clustered | 20.06 ms | **6.02 ms** | **3.33×** | **0.29 ms** | 5.53 ms |
+| `Tree3` uniform | 41.87 ms | 25.29 ms | 1.66× | 6.04 ms | 2.73 ms |
+| `Tree3` clustered | 56.17 ms | 27.73 ms | 2.03× | 0.89 ms | 9.12 ms |
+
+Two findings:
+
+1. **On clustered data the median split culls 3.06× and answers k-NN 1.65× faster** than
+   the midpoint binary tree (and beats `Octree3`/`LinearOctree3` by more). On *uniform*
+   data the gap narrows to 1.23×/1.16× — there is nothing to balance, which is the
+   control that makes the clustered number meaningful.
+2. **The median split also parallelises about twice as well** (3.3× vs 1.7–2.0× on 16
+   threads). This is structural, not incidental: `rayon::join` is worth what its *slower*
+   half is worth, a median split hands each fork exactly `n/2` points by construction, and
+   a midpoint split halves the *box* — on clustered data one side can receive almost
+   everything and becomes a serial tail with idle threads beside it. The literature
+   presents the median split's O(n) selection as its cost; **that cost is the part that
+   recovers best from cores**, and threaded, the k-d build (6.0 ms) is faster than every
+   serial build measured, including the linear octree's 13.6 ms.
+
+The parallel build is **node-for-node identical** to the serial one (asserted in the kit's
+tests: node count, every leaf box and range, depth, and all query answers), because the
+serial build already emits parent-then-left-then-right, so a subtree can be built into its
+own node vector and spliced in with an id shift.
+
+### 8.2 When an index beats a linear scan: the frustum-cull crossover
+
+A guard's view cone is a 6-plane `Polyhedron3`; "who is in my cone" can be an indexed cull
+or a linear scan of every agent against the same six half-spaces. Both were run **every
+frame, on the same data, with the answers compared** (9 cones, 90 occluders):
+
+| crowd | indexed cull | linear scan | winner |
+| ---: | ---: | ---: | :--- |
+| 40 | 3 µs | **1 µs** | scan, 3× |
+| 160 | 7 µs | **2 µs** | scan, 3.5× |
+| 640 | 21 µs | **11 µs** | scan, 1.9× |
+| 2 560 | **87 µs** | 218 µs | index, 2.5× |
+| 10 240 | **306 µs** | 908 µs | index, 3.0× |
+| 40 000 | **467 µs** | 3 328 µs | index, 7.1× |
+
+**The crossover is ~1000 agents** — the same order as §6's `BRUTE_FORCE_MAX` for sphere
+culls, reached from a completely different query verb. Below it the index is honestly
+slower: a `contains_point` against six planes is a handful of FMAs, and the traversal
+costs more than looking at everything.
+
+Also worth recording: at 40 000 agents the **exact line-of-sight** stage (capsule
+broadphase → `Polyhedron3::segment_hit` per candidate) costs 8 091 µs — an order of
+magnitude more than either broadphase. Where a narrowphase runs per *candidate*, tightening
+the query volume beats optimising the broadphase.
+
+### 8.3 SPH: the neighbour search *is* the simulation
+
+Position-based fluid, 2 200 particles, 3 constraint iterations/step, per frame:
+
+| neighbour index | maintain | query | physics | fps |
+| --- | ---: | ---: | ---: | ---: |
+| `MortonGrid` (rebuilt each step) | 0.21 ms | 1.90 ms | 1.82 ms | 254 |
+| `Tree` + `ItemRef` (kept, relocated) | **0.06 ms** | 2.22 ms | 1.76 ms | 253 |
+| `LinearQuadTree` (rebuilt each step) | 0.21 ms | **1.84 ms** | 1.40 ms | **269** |
+
+The keep-index tree's maintain is **~3.5× cheaper than either rebuild** on a workload where
+*every* item moves every step — the strongest case yet for the `ItemRef` thesis — but it
+gives part of it back in query, because a kept tree drifts from the ideal partition while a
+rebuild is always perfectly fitted. **Query dominates every mode**, which is the headline:
+in SPH the neighbour search is the simulation cost and the physics is cheap arithmetic.
+
+### 8.4 k-NN per point on a static skewed cloud
+
+150 000 points on surfaces (ground sheet, building shells, canopies — dense in thin sheets,
+empty between), colouring each point by its local density, i.e. one k-NN query per point:
+
+| structure | build | k-NN over all points | per query |
+| --- | ---: | ---: | ---: |
+| `KdTree3` | 11 ms | **195 ms** | **1.63 µs** |
+| `Octree3` | 19 ms | 218 ms | 1.82 µs |
+| `MortonGrid3` | **6 ms** | 329 ms | 2.74 µs |
+
+Consistent with 8.1 on real (not synthetic) skew: median split 1.68× the flat grid on k-NN
+and 1.7× faster to build than the midpoint octree, while the flat grid still wins the build
+outright. Build-once-query-many favours the k-d tree; rebuild-often-query-rarely does not.
+
+### 8.5 Methodology note: an index only knows what it holds
+
+The 8.2 comparison disagreed on ~77% of frames before it was trusted. The library was
+innocent — a standalone check (400 random frustums × 4 000 points) found **0**
+disagreements between `Tree3::cull` and per-point `contains_point`. The cause was that some
+agents had drifted **outside the index's world box**, where `bulk_load` correctly drops
+them while a linear scan still counts them. Neither side was wrong; they were answering
+questions about different sets.
+
+The general point for any index-vs-brute-force comparison, this thread's included: verify
+that both sides see the same population *before* attributing a difference to the algorithm.
+It is also why an index-vs-scan comparison is worth running continuously rather than once —
+it is a live invariant, not a benchmark.
