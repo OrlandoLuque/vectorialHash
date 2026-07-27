@@ -15,7 +15,7 @@ path or the template bank, and refresh the tables.
 | [5](#results-5--vh-bench-scale-figureleftrightgrid-scale-equivalence) | `vh bench-scale`: figure↔grid scale equivalence | One canonical set serves many query scales: 25× less memory, 10× faster generation; cull cost equals direct at low factors, ~2.5× at factor 8. |
 | [6](#results-6--headless-critters-a-full-dynamic-workload) | `critters_headless`: full dynamic workload (updates + culls + churn) | Quadtree ahead 10–35% even on dynamic ops (depth halves `locate`); hysteresis helps the binary tree; `item_limit` is the dominant knob; deterministic cross-structure runs with zero cull mismatches. |
 | [7](#results-7--gpu-sort-the-on-gpu-lbvh-build-and-the-keeprebuild-crossover-2026-07-17) | GPU: radix sort · on-GPU LBVH build · keep↔rebuild crossover + adaptive · quantised nodes | GPU radix **8–23× the CPU at scale** (hierarchical scan + 8-bit/4-pass width; bitonic was ~2× slower); a whole LBVH builds **GPU-resident in ~4.4 ms/frame at 1 M** (verified by traversal-vs-brute); moving-data crossover at **f\* ≈ 30 % → 2.8 % moving** as N grows 262k→4M; adaptive-with-hysteresis beats both pure strategies; **quantised u16 BVH nodes are 1.6× smaller and EXACT** (footprint, not latency). |
-| [8](#results-8--median-vs-midpoint-and-three-application-workloads-2026-07-27) | Median vs midpoint split (query + parallel build) · frustum index-vs-scan crossover · SPH neighbour search · static k-NN | Median split culls **3.06×** and k-NNs **1.65×** the midpoint tree on clustered data, and parallelises **3.3× vs 1.7-2.0×** (equal-count forks balance by construction); a frustum index only beats a linear scan **above ~1000 agents** (7.1× at 40k) while the exact LoS narrowphase dominates at scale; in SPH the **query IS the simulation cost** and keep-index maintain is ~3.5× cheaper than any rebuild. |
+| [8](#results-8--median-vs-midpoint-and-three-application-workloads-2026-07-27) | Median vs midpoint split (query + parallel build) · frustum index-vs-scan crossover · SPH neighbour search · static k-NN | Median split culls **2.2-2.5×** and k-NNs **1.67×** the midpoint tree on clustered data, and parallelises **3.4× vs 1.6-1.9×** (equal-count forks balance by construction); a frustum index only beats a linear scan **above ~1000 agents** (6.7× at 40k) while the exact LoS narrowphase dominates at scale; in SPH the **query IS the simulation cost**, and keep-index maintain is 3.5-3.9× cheaper than any rebuild but loses the frame on query. **All figures re-measured as medians of repeated idle-gated passes (§8.6) — three first-pass claims did not survive.** |
 
 ## Environment
 
@@ -624,6 +624,12 @@ because each is a *methodology* result — the kit keeps only the conclusion.
 
 Environment as §7 (Windows 10, RTX 4080 SUPER box, 16 threads, `--release`).
 
+**Every figure below is the median of repeated passes** taken by the kit's `bench-runner`
+(`cargo run -p bench-runner --release -- --group <g> --repeat N`), which waits for the
+machine to be idle before each pass and reports the peak-to-peak spread. This section was
+**re-measured that way on 2026-07-27**, and §8.6 records the three figures from the first,
+hand-taken pass that did not survive.
+
 ### 8.1 The median split: worse build, better query — and the better parallel build
 
 `KdTree3` splits at the point-count **median**; `Tree3`/`Octree3` split at the spatial
@@ -631,19 +637,22 @@ Environment as §7 (Windows 10, RTX 4080 SUPER box, 16 threads, `--release`).
 
 | | build serial | build par (16 thr) | speed-up | cull ×64 | knn k=16 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `KdTree3` uniform | 20.47 ms | **6.29 ms** | **3.25×** | 4.91 ms | 2.36 ms |
-| `KdTree3` clustered | 20.06 ms | **6.02 ms** | **3.33×** | **0.29 ms** | 5.53 ms |
-| `Tree3` uniform | 41.87 ms | 25.29 ms | 1.66× | 6.04 ms | 2.73 ms |
-| `Tree3` clustered | 56.17 ms | 27.73 ms | 2.03× | 0.89 ms | 9.12 ms |
+| `KdTree3` uniform | 20.13 ms | **6.03 ms** | **3.35×** | 4.87 ms | 2.34 ms |
+| `KdTree3` clustered | 20.57 ms | **6.02 ms** | **3.38×** | **0.39 ms** | 5.45 ms |
+| `Tree3` uniform | 40.49 ms | 25.77 ms | 1.56× | 6.07 ms | 2.74 ms |
+| `Tree3` clustered | 55.86 ms | 29.98 ms | 1.86× | 0.87 ms | 9.12 ms |
+| `KdTree2` (2D, clustered) | 7.96 ms | **2.85 ms** | **2.79×** | 7.42 ms | 1.47 ms |
 
 Two findings:
 
-1. **On clustered data the median split culls 3.06× and answers k-NN 1.65× faster** than
-   the midpoint binary tree (and beats `Octree3`/`LinearOctree3` by more). On *uniform*
-   data the gap narrows to 1.23×/1.16× — there is nothing to balance, which is the
-   control that makes the clustered number meaningful.
-2. **The median split also parallelises about twice as well** (3.3× vs 1.7–2.0× on 16
-   threads). This is structural, not incidental: `rayon::join` is worth what its *slower*
+1. **On clustered data the median split culls 2.2–2.5× and answers k-NN 1.67× faster**
+   than the midpoint binary tree (and beats `Octree3`/`LinearOctree3` by more). On
+   *uniform* data the gap narrows to 1.24×/1.17× — there is nothing to balance, which is
+   the control that makes the clustered number meaningful. The cull ratio is quoted as a
+   range on purpose: the k-d cull is ~0.39 ms, the smallest quantity in the table, and it
+   moves ±7% between passes.
+2. **The median split also parallelises about twice as well** (3.4× vs 1.6–1.9× on 16
+   threads; the 2D twin `KdTree2` repeats it at 2.8×). This is structural, not incidental: `rayon::join` is worth what its *slower*
    half is worth, a median split hands each fork exactly `n/2` points by construction, and
    a midpoint split halves the *box* — on clustered data one side can receive almost
    everything and becomes a serial tail with idle threads beside it. The literature
@@ -662,14 +671,16 @@ A guard's view cone is a 6-plane `Polyhedron3`; "who is in my cone" can be an in
 or a linear scan of every agent against the same six half-spaces. Both were run **every
 frame, on the same data, with the answers compared** (9 cones, 90 occluders):
 
+Means over 600 stepped frames, median of 3 passes:
+
 | crowd | indexed cull | linear scan | winner |
 | ---: | ---: | ---: | :--- |
-| 40 | 3 µs | **1 µs** | scan, 3× |
-| 160 | 7 µs | **2 µs** | scan, 3.5× |
-| 640 | 21 µs | **11 µs** | scan, 1.9× |
-| 2 560 | **87 µs** | 218 µs | index, 2.5× |
-| 10 240 | **306 µs** | 908 µs | index, 3.0× |
-| 40 000 | **467 µs** | 3 328 µs | index, 7.1× |
+| 40 | 3.1 µs | **1.1 µs** | scan, 2.7× |
+| 160 | 7.6 µs | **3.7 µs** | scan, 2.1× |
+| 640 | 22.8 µs | **16.8 µs** | scan, 1.4× |
+| 2 560 | **92.0 µs** | 224.4 µs | index, 2.4× |
+| 10 240 | **226.8 µs** | 934.8 µs | index, 4.1× |
+| 40 000 | **514.4 µs** | 3 431.7 µs | index, 6.7× |
 
 **The crossover is ~1000 agents** — the same order as §6's `BRUTE_FORCE_MAX` for sphere
 culls, reached from a completely different query verb. Below it the index is honestly
@@ -677,7 +688,7 @@ slower: a `contains_point` against six planes is a handful of FMAs, and the trav
 costs more than looking at everything.
 
 Also worth recording: at 40 000 agents the **exact line-of-sight** stage (capsule
-broadphase → `Polyhedron3::segment_hit` per candidate) costs 8 091 µs — an order of
+broadphase → `Polyhedron3::segment_hit` per candidate) costs 7 600 µs — an order of
 magnitude more than either broadphase. Where a narrowphase runs per *candidate*, tightening
 the query volume beats optimising the broadphase.
 
@@ -687,30 +698,37 @@ Position-based fluid, 2 200 particles, 3 constraint iterations/step, per frame:
 
 | neighbour index | maintain | query | physics | fps |
 | --- | ---: | ---: | ---: | ---: |
-| `MortonGrid` (rebuilt each step) | 0.21 ms | 1.90 ms | 1.82 ms | 254 |
-| `Tree` + `ItemRef` (kept, relocated) | **0.06 ms** | 2.22 ms | 1.76 ms | 253 |
-| `LinearQuadTree` (rebuilt each step) | 0.21 ms | **1.84 ms** | 1.40 ms | **269** |
+| `MortonGrid` (rebuilt each step) | 0.107 ms | **1.541 ms** | 1.082 ms | **337** |
+| `Tree` + `ItemRef` (kept, relocated) | **0.031 ms** | 1.884 ms | 1.095 ms | 306 |
+| `LinearQuadTree` (rebuilt each step) | 0.121 ms | 1.620 ms | 1.077 ms | 327 |
 
-The keep-index tree's maintain is **~3.5× cheaper than either rebuild** on a workload where
-*every* item moves every step — the strongest case yet for the `ItemRef` thesis — but it
-gives part of it back in query, because a kept tree drifts from the ideal partition while a
-rebuild is always perfectly fitted. **Query dominates every mode**, which is the headline:
-in SPH the neighbour search is the simulation cost and the physics is cheap arithmetic.
+The keep-index tree's maintain is **3.5–3.9× cheaper than either rebuild** on a workload
+where *every* item moves every step — the strongest case yet for the `ItemRef` thesis —
+but it gives more than that back in query (+22%), because a kept tree drifts from the
+ideal partition while a rebuild is always perfectly fitted; on this workload keeping the
+index is a net loss. The two rebuilt structures are within 5% of each other, the flat grid
+marginally ahead. **Query dominates every mode**, which is the headline: in SPH the
+neighbour search is the simulation cost and the physics is cheap arithmetic.
 
 ### 8.4 k-NN per point on a static skewed cloud
 
 150 000 points on surfaces (ground sheet, building shells, canopies — dense in thin sheets,
 empty between), colouring each point by its local density, i.e. one k-NN query per point:
 
-| structure | build | k-NN over all points | per query |
-| --- | ---: | ---: | ---: |
-| `KdTree3` | 11 ms | **195 ms** | **1.63 µs** |
-| `Octree3` | 19 ms | 218 ms | 1.82 µs |
-| `MortonGrid3` | **6 ms** | 329 ms | 2.74 µs |
+Median of 7 passes:
 
-Consistent with 8.1 on real (not synthetic) skew: median split 1.68× the flat grid on k-NN
-and 1.7× faster to build than the midpoint octree, while the flat grid still wins the build
-outright. Build-once-query-many favours the k-d tree; rebuild-often-query-rarely does not.
+| structure | build | k-NN over all points | per query | spread |
+| --- | ---: | ---: | ---: | ---: |
+| `KdTree3` | 11.0 ms | 214.0 ms | **1.78 µs** | 16% |
+| `Octree3` | 18.5 ms | 215.8 ms | 1.80 µs | 3% |
+| `MortonGrid3` | **6.3 ms** | 322.3 ms | 2.69 µs | 2% |
+
+Both trees are **~1.5× the flat grid** on k-NN, and are **tied with each other** — 214.0 vs
+215.8 ms sits well inside the k-d tree's own 16% run-to-run spread. So on real (not
+synthetic) skew the median split's advantage over the midpoint octree shows up in the
+**build** (1.7×), not the query; against the *grid*, adaptivity wins either way. The flat
+grid still wins the build outright. Build-once-query-many favours a tree;
+rebuild-often-query-rarely favours the grid.
 
 ### 8.5 Methodology note: an index only knows what it holds
 
@@ -725,3 +743,30 @@ The general point for any index-vs-brute-force comparison, this thread's include
 that both sides see the same population *before* attributing a difference to the algorithm.
 It is also why an index-vs-scan comparison is worth running continuously rather than once —
 it is a live invariant, not a benchmark.
+
+### 8.6 What re-measuring changed (and the tool that did it)
+
+§8 was first written from single, hand-taken readings — each bench run once, whenever the
+work happened to finish, on a machine that was doing other things. Re-running the whole
+set with the kit's `bench-runner` (idle-gated, repeated, spread-reporting) contradicted
+three of the published figures:
+
+| claim | hand-taken | median of repeated passes |
+| --- | ---: | ---: |
+| `KdTree3` cull vs `Tree3`, clustered | 3.06× | **2.2–2.5×** |
+| fluid: which index wins the neighbour query | `LinearQuadTree` | **`MortonGrid`, by 5%** |
+| point cloud: `KdTree3` k-NN vs `Octree3` | 1.12× | **tied** (inside the k-d spread) |
+
+Two of the three were *qualitative* claims — "the adaptive structure wins the query", "the
+median split answers k-NN faster than the octree" — reversed by noise of a few percent.
+The absolute times moved by 25–30% between sessions on the same machine and binary, while
+*ratios measured within a single pass* stayed stable to ~2%. Two rules follow, and they
+cost nothing:
+
+1. **Quote ratios, not absolutes**, unless the environment is pinned in the same table.
+2. **A number seen once is not a measurement.** Report the spread; if it is above ~10%,
+   quote a range and say which quantity is the small one.
+
+A third rule came from the stealth demo rather than the tool: it reported *one frame's*
+values, and across three passes one landed on a frame that had not stepped and printed a
+plausible, clean **zero**. Summaries must aggregate over the run, not sample it.
