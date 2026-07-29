@@ -770,3 +770,99 @@ cost nothing:
 A third rule came from the stealth demo rather than the tool: it reported *one frame's*
 values, and across three passes one landed on a frame that had not stepped and printed a
 plausible, clean **zero**. Summaries must aggregate over the run, not sample it.
+
+
+---
+
+## Results 9 — counting instead of timing, and the defect it found (2026-07-29)
+
+Section 8 ended on rules about how to *time* things. This section is about not timing them.
+
+What differs between a binary tree, an octree, a k-d tree and a uniform grid answering the
+same query is **how much work each does**: node boxes classified, points tested. Those are
+integers. They are identical on every run, on every machine, at every optimisation level, and
+under any background load — verified byte-for-byte between an idle run and one taken with 32
+processes burning CPU, and verified again by a CI job on Linux against numbers blessed on
+Windows. No clock is involved, so none of section 8's problems exist.
+
+The instrumentation needs no library change. `cull` accepts any shape, so the query is wrapped
+in a counter that tallies each `classify_aabb`/`contains_point` and forwards. `knn` and
+`raycast` take a point and a ray, so for those the counter goes in the **item** instead: a
+traversal must ask an item where it is before testing it, so counting `position()` counts leaf
+work for every verb and every structure.
+
+### What the counts say
+
+**The median split does not beat the binary tree; it beats skew.** k-NN, k=8, 200k points:
+
+| distribution | `KdTree3` points tested/query | `Tree3` | ratio |
+| --- | ---: | ---: | ---: |
+| clustered (6 tight blobs) | 219 | 404 | **1.8×** |
+| uniform | 86.6 | 92.1 | **1.06×** |
+
+The advantage is not a property of the structure. It is the structure meeting non-uniform data,
+and on uniform data the cheaper build wins and the k-d tree has nothing to sell. A timing
+experiment can show the 1.8×; it cannot show *why*, because a duration has no units of cause.
+
+**A uniform grid's k-NN collapses under clustering** — 596 points tested per query on uniform
+data, **166 640** on clustered, out of 200 000. The shell expansion crosses empty cells until
+it reaches a blob, then has to scan the blob whole.
+
+**Approximate queries should be quoted with recall, not just speed.** The DDA ray walks visit
+only the leaves the centre ray crosses, so they return a strict subset of the exact capsule
+answer — documented, but never checked. Counted: zero invented hits across all three walks,
+and the trade is 75% of the hits for 23% of the point tests (binary tree), 50% for 11%
+(octree). "Faster" alone would have been a misleading way to describe either.
+
+### The defect the counting found
+
+The 166 640 above is not only clustering. `MortonGrid3` derives its cell size from a single
+`levels` value for all three axes, so a world that is not a cube does not get cubic cells: at
+levels 5 a 1000×300×1000 world has cells of 31.25 × 9.375 × 31.25. An expansion that grows one
+Chebyshev radius for all three axes is then **isotropic in cell space and anisotropic in world
+space** — to reach 30 units along the short axis it drags the wide axes out to ±125 and scans
+everything between. Growing each axis separately, always the one currently narrowest in world
+units, keeps the scanned region near-cubic. The stopping rule is unchanged and still exact:
+the region is still a box, so the nearest unscanned point is still at least `safe` away.
+
+| world aspect (h/w) | points tested/query | ms/query | speed-up |
+| ---: | ---: | ---: | ---: |
+| 1.00 (cubic cells) | 14 946 → 14 823 | 0.2012 → 0.0883 | **2.3×** |
+| 0.50 | 33 846 → 14 595 | 0.5713 → 0.0889 | **6.4×** |
+| 0.30 | 41 529 → 12 933 | 1.0779 → 0.0867 | **12.4×** |
+| 0.15 | 45 510 → 11 452 | 1.3533 → 0.0784 | **17.3×** |
+| 0.05 | 48 219 → 10 591 | 1.6112 → 0.0761 | **21.2×** |
+
+(50k clustered points, k=8, levels 5. The 2D grid had the identical defect on a non-square
+rectangle and the identical fix, 1.9× to 8.6× — one fewer axis to over-scan.)
+
+### Two rules, both learned the hard way here
+
+**A count only counts what you counted.** Look at the cubic row: the point count barely moves
+and the time still falls 2.3×. Every one of those saved cycles went on **cells never visited** —
+the old enumeration walked the whole Chebyshev shell and rejected out-of-grid cells one at a
+time, the new one clamps its loops to the grid. Visiting an empty cell costs real time and
+calls nobody's `position()`. Counts *prove* an algorithmic change; they do not *bound* one. When
+a count says nothing changed and a clock disagrees, the clock may be measuring something nobody
+thought to count.
+
+**A ratio is only true while both of its terms stand still.** The kit's documentation said the
+adaptive linear octree answered a clustered k-NN ~5× faster than the uniform grid. It did, when
+it was written. After the per-axis fix the grid got ~3.6× faster on that workload and the gap
+collapsed to **1.4–1.7×** (three paired runs; quoted as a range because the third read 1.74
+where the first two read 1.41, spread 30%). The linear octree did not get worse — its rival got
+better, and nothing in the repository would have noticed if the benchmark that produced the
+figure had not still been runnable. Publish the *measurement*, not only the number.
+
+### And the gate that follows from all of this
+
+Because the counts have no variance, they are the only quantity here that can be gated with
+`==` rather than a tolerance. Twenty traversal counts across ten structures and three verbs are
+now checked exactly, in CI, on every push. A timing gate has to pass anything within ~25%,
+which means a traversal change costing 15% more work reads as noise; this one cannot miss it.
+
+Two cautions, both from building it. The first version of the gate blessed `tested = 0` for
+four of five 3D structures — uniform query points in a world holding six tight clusters mostly
+land in empty space, so it was a ratchet holding nothing. And it was only trusted after being
+checked against a deliberate perturbation: changing a leaf capacity from 16 to 15 must fail it,
+and does. **A test that has never been watched fail is a comment.**
