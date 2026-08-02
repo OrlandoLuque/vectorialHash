@@ -866,3 +866,151 @@ four of five 3D structures — uniform query points in a world holding six tight
 land in empty space, so it was a ratchet holding nothing. And it was only trusted after being
 checked against a deliberate perturbation: changing a leaf capacity from 16 to 15 must fail it,
 and does. **A test that has never been watched fail is a comment.**
+
+## Results 10 — when a measurement is not measuring what its name says (2026-08-02/03)
+
+Two nights whose findings are almost all *methodological*, and whose most useful output is a
+list of things that were believed on insufficient evidence — several of them written down here
+by us. The measurements live in `vectorial-hash-kit`; the reasoning belongs here.
+
+### 10.1 A comparison can be rigged by omission, not by intent
+
+The kit's stealth demo races an index against a linear scan and reports which wins. It also
+rebuilt that index from scratch every frame **outside every timer**. So the index's cost was its
+queries, the scan's cost was its queries, and the index's maintenance was free because nobody
+had written a clock around it.
+
+Charging it changes the verdict completely (600 stepped frames, means):
+
+| crowd | kept: maintain + cull | rebuilt: maintain + cull | scan | verdict, kept |
+| ---: | ---: | ---: | ---: | ---: |
+| 200 | 1.4 + 9.8 = 11.2 µs | 25.5 + 9.1 = 34.6 µs | 4.5 µs | scan wins, 0.40× |
+| 2 000 | 15.2 + 78.9 = 94.1 µs | 339.7 + 80.0 = 419.7 µs | 151.4 µs | index, 1.61× |
+| 20 000 | 296.8 + 351.0 = 647.8 µs | 4 903.0 + 354.0 = 5 257.0 µs | 1 760.2 µs | index, 2.72× |
+
+Charged for the rebuild, **the index never wins at any size measured**. The demo would have been
+answering "the index does not pay here" — correctly, for a workload nobody would write.
+
+The general form is worth stating because it is easy to reach with no bad intent: *if one side of
+a comparison has a cost the other does not, and that cost sits outside the timed region, the
+comparison measures the omission.*
+
+### 10.2 The threshold that is not a number
+
+"Below how many items does a linear scan beat an index?" had two competing answers in one
+codebase — 512 shipped, 182 measured — and the disagreement stood for months. It was
+unresolvable as posed. A scan costs per **query**; an index costs per **move**. Sweeping both
+axes (500³ world, 300 frames, a quarter of the population moving each frame, every arm run
+through the same index with its backend pinned so only the backend differs):
+
+| population | 1 cull/frame | n/16 | n/4 | n culls/frame |
+| ---: | --- | --- | --- | --- |
+| 64 | scan 1.96× | scan 1.41× | scan 1.10× | scan 1.06× |
+| 128 | scan 2.07× | scan 1.12× | **keep 1.10×** | **grid 1.28×** |
+| 512 | scan 3.80× | keep 1.45× | keep 1.80× | grid 1.97× |
+| 2 048 | **scan 7.00×** | keep 2.82× | grid 4.60× | grid 5.33× |
+
+Read along a row: the winner changes with query load alone. A scan still wins **7× at 2 048
+items** if you barely query it, and loses at 128 if you query hard. Any single-number answer is a
+point on this surface mistaken for the surface. The kit now splits it into an unconditional floor
+— set from the case *least* favourable to a scan, so it can only ever override a wrong choice —
+and a load-aware rule that sees the query count.
+
+### 10.3 Bisection assumes monotonicity; a noisy predicate has none
+
+The calibration tool found that threshold by bisecting on "does the index win at n?". Near the
+crossover the two costs are within measurement noise, so the predicate flips at random and the
+search walks off. Its own printed trace said exactly that, and had been read as a result:
+
+```
+527  scan     975  index     927  scan     935  scan     942  index
+```
+
+Replaced with a ladder: every rung measured and printed, the answer being the largest population
+where the scan wins on *every* rung up to it. A single noisy flip then costs one rung of
+conservatism instead of an order of magnitude. **Bisection is a search, not a measurement, and it
+inherits every property it assumes.**
+
+### 10.4 A performance gate on a shared machine is a coin flip
+
+Two consecutive runs of the same binary, minutes apart, on a desktop at 76 % CPU behind a chat
+client and an editor:
+
+| op (untouched by any commit) | run 1 | run 2 |
+| --- | ---: | ---: |
+| `cull_tree3_x64` | −2.8 % | **+54.0 %** |
+| `cull_octree3_x64` | −2.2 % | **+60.3 %** |
+
+The fix is not a wider tolerance — that only moves where the coin lands. A suspected regression
+is re-measured over further passes and must survive all of them, compared on the best reading:
+each op's estimator is already min-of-N, so extra passes widen N exactly where it matters, and a
+transient cannot be the minimum of every pass. First run of the confirming gate: **14 ops over
+threshold on pass one, 1 survived.** That ratio is the argument.
+
+### 10.5 In an interleaved sweep, position in the frame is a confound — and controls matter
+
+A sweep that maintains several structures and then culls them all times each arm in a different
+cache state. We reported a kept grid culling 1.09–1.17× faster than a rebuilt one holding the
+same points at identical parameters, and "explained" it by frame position on the strength of one
+experiment: swapping the two arms moved the ratio from 1.11× to 1.06×.
+
+Rotating *every* arm's position each frame — the actual control — left the ratio unchanged. The
+swap had moved the number by less than the run-to-run spread. Seven hypotheses have now been
+tested. Six are refuted: identical traversal counts (so nothing algorithmic), rotation, a warm
+isolated bench (1.00×), a cold isolated bench (0.97×), and equal populations asserted every
+frame. The seventh — interaction with the *other* arms' cache traffic, which rotation does not
+equalise — moves the ratio the right way (0.96× → 1.01/1.05/1.10× with 16 MB walked before each
+arm) but not far enough, with a spread as large as the effect.
+
+It stands as **unexplained**, deliberately. The six failed reproductions are more useful to the
+next person than a fourth guess would be. **One A/B on a noisy metric is not evidence for a cause
+any more than it is for an effect.**
+
+### 10.6 A negative result that saved a feature from being built
+
+An in-place `update` on a hash-bucketed uniform grid looked slow because of its predicate scan of
+the target cell — which suggested a handle layer, the O(1) trick that makes the kit's pointer
+trees 5.7× cheaper to maintain. Before building it, the cost was decomposed by holding the item
+count fixed and varying only cell occupancy:
+
+| mean items/cell | 39.1 | 4.9 | 1.3 | 1.0 |
+| --- | ---: | ---: | ---: | ---: |
+| stayed in its cell, ns/item | 92.4 | 72.5 | 100.8 | 98.5 |
+| a fresh insert, ns/item | 80.5 | 94.7 | 148.4 | 136.1 |
+
+Occupancy varies 39× and the cost is flat — and *highest* where cells hold one item each. The
+scan is not the cost; the hash lookup is, and a handle would still have to reach the bucket.
+**The feature was designed, measured against, and dropped.**
+
+The rule that replaced it is worth more than the feature would have been: such an update *saves
+the calls you do not make, not the calls you do*. It is a wash per call, and wins 8× at 10 % of
+items moving and 938× at 0.1 % — entirely because those callers skip it. And the break-even is
+not a constant: `f* = insert / cross` reads 0.66 at 2 000 items, 0.58 at 20 000, 0.55 at 200 000
+and **0.46 at 1 000 000**, because crossing a cell degrades 2.6× with population against a fresh
+insert's 1.8×.
+
+### 10.7 Warm-start migration
+
+An index that changes its own representation at runtime must rebuild into the new one, and
+typically does so from arrival order — which is spatially arbitrary, while the structure being
+discarded has spent its whole life sorting exactly those points. Handing the successor that
+order instead (50 000 points):
+
+| target | from arrival order | from the predecessor's order | speed-up |
+| --- | ---: | ---: | ---: |
+| uniform grid | 7 009 µs | 6 550 µs | 1.07× |
+| k-d tree (median split) | 8 181 µs | 5 774 µs | **1.42×** |
+| binary tree, inserts | 15 625 µs | 8 633 µs | **1.81×** |
+| binary tree, bulk load | 13 205 µs | 10 508 µs | 1.26× |
+
+Two caveats matter more than the numbers. The ordering has to be *free*: a grid hands back
+Z-order for the cost of sorting its cell keys and a tree hands back DFS order, but deriving one
+by sorting all N points makes the migration pay for the sort it is trying to avoid. And we could
+not price it end-to-end — migrations are ~2 % of a representative run and the saving is under 1 %
+of the total, against tens of percent of run-to-run noise. The per-migration figure is directly
+measured; the end-to-end figure does not exist, and saying so is more useful than quoting noise.
+
+A related trap: the first attempt to measure this reported **zero effect**, because that
+workload's migrations never *left* the one backend able to supply an order. A feature that cannot
+fire looks exactly like a feature that does not help. The instrumentation now counts how often
+the optimisation actually ran, printed next to the timing.
