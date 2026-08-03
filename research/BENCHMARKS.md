@@ -1075,3 +1075,64 @@ A related trap: the first attempt to measure this reported **zero effect**, beca
 workload's migrations never *left* the one backend able to supply an order. A feature that cannot
 fire looks exactly like a feature that does not help. The instrumentation now counts how often
 the optimisation actually ran, printed next to the timing.
+
+### 10.8 Setup inside the clock does not cancel — it inverted a result, then a sweep found three more
+
+A bulk build consumes its input, so the natural way to bench one is:
+
+```rust
+compare(rounds, || build(items.clone()), || build_par(items.clone()))
+```
+
+Both arms clone. Same size, same type, same thread. It reads like a constant added to both sides,
+and the arithmetic appears to close the question: if the measured ratio is `(C + t_par)/(C + t_ser)`,
+a larger `C` drags it toward 1.0 and can never carry it across. A real speed-up still reads as a
+speed-up — smaller, but never reversed.
+
+That argument is wrong. Measured on a binary integer tree's parallel bulk load, 16 threads:
+
+| harness | 10k | 100k | 500k |
+| --- | ---: | ---: | ---: |
+| clone **inside** the clock | 0.67× | 0.68× | 0.89× |
+| clone **outside** | 1.97× | 2.01× | 2.33× |
+
+Same code, same machine, same A-B-B-A round structure — and opposite recommendations. One says
+the parallel build is a pessimisation to be documented or deleted; the other says ship it.
+
+**Why the arithmetic fails.** Its premise is that `C` is equal in the two arms. It is not. The
+parallel arm releases the input from a different allocator state than the serial one, and its
+sixteen workers contend for memory bandwidth with whatever the clone left in flight. Setup and
+work are not independent, so they do not subtract. This is the same species of error as § 10.5:
+treating something measured *alongside* the phenomenon as though it were separable from it.
+
+**The distortion scales inversely with the cost of the real work**, which is the part that
+generalises. A sweep of every bench in the kit found four sites with an allocation between the
+clock's start and stop, and the correction sorted itself by how expensive the measured build was:
+
+| structure | build cost | published | corrected |
+| --- | --- | ---: | ---: |
+| binary tree (3D, midpoint split) | cheap | 1.56× / 1.86× | **2.01× / 2.17×** |
+| quadtree (4-way) | moderate | 1.2–1.9× | 1.44–1.75× |
+| k-d tree (3D, median select) | expensive | 3.4× / 3.3× | 3.1× / 3.5× (in the spread) |
+| k-d tree (2D, median select) | expensive | 2.79× | 2.78× |
+
+So a harness of this shape lies **most about the code that is fastest** — precisely the code one
+is usually trying to prove is fast. The median-select builds, whose own work dominates the clone,
+were essentially unaffected; the cheap midpoint build was hiding a fifth of its fan-out.
+
+**Two conclusions changed, not just two numbers.** The midpoint tree's thread-scaling table had
+read 16 threads as *worse* than 8 (1.58× vs 1.86×), which invites the reading "past eight threads
+it degrades"; measured honestly it is a plateau (2.04× and 2.01×). And in one bench the clone was
+charged to the two candidate arms but not to the incumbent baseline, which iterated the input by
+reference — so the headline column was biased against the very thing the bench was proposing.
+
+**How it was caught, which is the transferable part.** Not by inspection, and not by suspecting
+the harness. The bench measured a *control it did not strictly need*: a second structure with the
+same split geometry and the same parallel machinery. The control read 0.68× as well — while that
+same algorithm's own long-standing bench, elsewhere in the repository, had it winning 2.17× over
+serial. **Two of one's own measurements disagreeing about a single algorithm is the signal.**
+§ 10.5's lesson was that one A/B on a noisy metric is not evidence of a cause; this is its
+companion: when your instruments disagree, the instrument is a suspect, not only the machine.
+
+A negative result is the most dangerous kind to get wrong, because it is self-extinguishing —
+nobody re-runs a bench that already said "don't bother".
