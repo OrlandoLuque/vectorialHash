@@ -947,7 +947,7 @@ each op's estimator is already min-of-N, so extra passes widen N exactly where i
 transient cannot be the minimum of every pass. First run of the confirming gate: **14 ops over
 threshold on pass one, 1 survived.** That ratio is the argument.
 
-### 10.5 In an interleaved sweep, position in the frame is a confound — and controls matter
+### 10.5 A ratio that is not a property — and the four wrong answers it took
 
 A sweep that maintains several structures and then culls them all times each arm in a different
 cache state. We reported a kept grid culling 1.09–1.17× faster than a rebuilt one holding the
@@ -955,16 +955,77 @@ same points at identical parameters, and "explained" it by frame position on the
 experiment: swapping the two arms moved the ratio from 1.11× to 1.06×.
 
 Rotating *every* arm's position each frame — the actual control — left the ratio unchanged. The
-swap had moved the number by less than the run-to-run spread. Seven hypotheses have now been
-tested. Six are refuted: identical traversal counts (so nothing algorithmic), rotation, a warm
-isolated bench (1.00×), a cold isolated bench (0.97×), and equal populations asserted every
-frame. The seventh — interaction with the *other* arms' cache traffic, which rotation does not
-equalise — moves the ratio the right way (0.96× → 1.01/1.05/1.10× with 16 MB walked before each
-arm) but not far enough, with a spread as large as the effect.
+swap had moved the number by less than the run-to-run spread. Six hypotheses were refuted in
+turn: identical traversal counts (so nothing algorithmic), rotation, a warm isolated bench
+(1.00×), a cold isolated bench (0.97×), and equal populations asserted every frame.
 
-It stands as **unexplained**, deliberately. The six failed reproductions are more useful to the
-next person than a fourth guess would be. **One A/B on a noisy metric is not evidence for a cause
-any more than it is for an effect.**
+The seventh looked decisive. If the gap needs the *other* arms' cache traffic — something
+rotation equalises the position of but not the presence of — then removing them should remove
+it. A flag that runs the sweep with only the two grids, skipped in both phases, gave eight
+A/B/B/A-paired readings with **zero overlap**: alone 0.99–1.07, with company 1.15–1.22.
+
+Then one parameter was swept, and it collapsed. Six paired readings per population
+(rebuilt ÷ kept; above 1.0 means the kept grid is faster):
+
+| population | two arms alone | all nine arms |
+| ---: | --- | --- |
+| 5 000 | 0.978–1.021 (**≈1.00**) | 0.960–1.028 (**≈1.00**) |
+| 20 000 | 0.976–1.008 (**≈1.00**) | 1.127–1.202 (**≈1.17**) |
+| 50 000 | **1.147–1.218 (≈1.19)** | 0.993–1.077 (**≈1.03**) |
+
+At 50 000 the advantage appears *without* company — the exact opposite of the mechanism the
+20 000 rows had just established. No distribution overlaps within a population, so none of this
+is noise: the effect is real, reproducible, and **conditional on the configuration in a way no
+tested mechanism predicts**.
+
+What can be asserted from the data alone: the kept grid is never slower, is sometimes ~1.2×
+faster, and the traversal counts are identical, so the difference lives entirely in the memory
+system. An effect that inverts its own precondition with population is a **footprint
+coincidence**, not a difference between keeping and rebuilding. The practical conclusion is
+therefore not to quote it: the column that separates these two reliably, at every population, is
+*maintain*, where the difference is algorithmic. The microarchitectural cause — which cache
+level, whose footprint crosses which boundary — is not pinned down and would need counters this
+kit does not have; a smaller gap than it appears, since the question anyone actually asks
+("is one of these faster to query?") is answered, and the answer is no.
+
+Four lessons, which are the real output:
+
+1. **One A/B on a noisy metric is not evidence for a cause any more than for an effect.** The
+   swap experiment moved the number by less than the run-to-run spread and was believed for a day.
+2. **Zero overlap across paired readings is not proof of a mechanism** — only that two conditions
+   differ *at that configuration*. It is exactly as convincing at a point where the conclusion
+   happens to be wrong, which is what makes it dangerous.
+3. **Sweep one parameter before believing any of it.** A single parameter change refuted a result
+   that eight clean paired readings had just established.
+4. **Controls are cheap and beliefs are expensive.** Rotating arms, asserting equal populations,
+   counting traversals and the arm-filter flag each cost under an hour; the four wrong
+   explanations cost two days between them.
+
+### 10.5b Machine noise is episodic, so "wait until it is idle" is not the control
+
+Every tool here told the reader to benchmark on a quiet machine, and the kit's bench runner waits
+for a load threshold before each pass. Measured on one desktop at 18–32 % background load:
+
+- **Ten identical runs of one operation: 851–1 192 µs, a 1.40× spread** — values spread through
+  the range, not two clusters.
+- **Two consecutive runs of the same gate binary on an untouched operation: ±3 %, then +74 %** —
+  and the +74 % run reported *lower* CPU load than the ±3 % ones.
+
+Load percentage does not predict it. Whatever the source, it arrives in episodes that an
+idle-*looking* machine does not rule out, so a threshold-based wait can burn minutes per
+measurement and still land inside one.
+
+Two designs survive it, and both are the standard estimator applied where it had been skipped:
+
+1. **Minimum over repeats**, which converges on the uncontended floor — the quantity that is
+   actually stable. This matters most for a *baseline*, which is the reference every future run
+   is judged against: a one-pass baseline here recorded one operation at **1.76× its floor**, and
+   would then never have flagged a 70 % regression in it.
+2. **Pairing inside one process.** The A/B/B/A comparison above separated cleanly at 18–46 %
+   load, because an episode that hits one arm hits its partner too.
+
+The corollary is worth stating plainly: **a number measured once is unmeasured**, and "the
+machine looked quiet" is not a method.
 
 ### 10.6 A negative result that saved a feature from being built
 
