@@ -1136,3 +1136,69 @@ companion: when your instruments disagree, the instrument is a suspect, not only
 
 A negative result is the most dangerous kind to get wrong, because it is self-extinguishing —
 nobody re-runs a bench that already said "don't bother".
+
+### 10.9 Reproducing a closed form — and reading a converging ratio as a growing one
+
+The kit measures the clustering of Morton and Hilbert keys by counting the maximal runs of
+consecutive keys a query box decomposes into. Boxes of side `s` **in cells**, 3D, averaged over
+200 random positions:
+
+| box side | Morton runs | Hilbert runs | M/H | H/s² | M/s² |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 25 | 16 | 1.62× | 0.98 | 1.58 |
+| 8 | 114 | 65 | 1.75× | 1.02 | 1.78 |
+| 16 | 462 | 249 | 1.86× | 0.97 | 1.80 |
+| 32 | 1 904 | 993 | 1.92× | 0.97 | 1.86 |
+
+Moon, Jagadish, Faloutsos & Saltz (TKDE 2001) give the Hilbert clustering number as the query's
+**surface area divided by twice the dimensionality** — for a cube of side `s` in 3D, `6s²/6 = s²`.
+The `H/s²` column is that prediction and reads 0.97–1.02. The measurement reproduces the closed
+form, which is worth more than agreeing with it in spirit: the check is now an **assertion** in the
+bench, because a wrong Hilbert encoder still prints a plausible-looking table.
+
+**★ The methodological point is the misreading it caught.** The `M/H` column climbs — 1.62, 1.75,
+1.86, 1.92 — and the natural gloss is that Hilbert's advantage *grows* with query size. It does
+not: it **converges**. Xu & Tirthapura (PODS 2012) proved Z-order is within a constant factor of
+optimal for any space-filling curve, and the `M/s²` column shows that constant settling at ~1.9
+while `H/s²` sits at 1.00. The small-box ratios are *below* the asymptote, not climbing toward
+infinity.
+
+The general form: **a ratio between two quantities that both grow must have its trend read against
+what each is converging to, not off a column of increasing numbers.** Four rising values are
+equally consistent with "diverging" and with "approaching a constant from below", and the two
+readings recommend opposite things — one says the choice matters more as you scale, the other says
+it is a fixed, one-time constant near 2. Normalising each series by its own predicted growth (here
+`s²`) separates them immediately; comparing the raw ratio never can.
+
+### 10.10 Three lessons from measuring the same object three ways
+
+Following the curve result, the box decomposition was implemented independently (descend the
+octree, emit maximal contained node intervals) and produced range counts of 45, 610, 9 358 and
+153 282 against `s²` = 49, 625, 9 801, 153 664 — a **third** independent confirmation of the same
+law, after the run counting and the published formula. Three agreeing derivations is the strongest
+form of the check, and it costs little once the first exists.
+
+Three failures came with it, each of a different species and all worth naming.
+
+**An impossible value is a gift.** The first over-scan column read a constant `0.80×` at every
+resolution and for both curves. A scan cannot read *fewer* keys than it returns, so the number was
+impossible on its face rather than merely surprising — and that is the only reason it was caught
+within a minute. The cause was dividing by the loop bound while some iterations `continue`d
+(0.80 = 32/40); the reason they skipped was that the query box was **masked** to the key width
+rather than clamped, so a box near the world edge wrapped to the far side and became a different
+box. Two bugs, one of them invisible, surfaced by a value that could not exist.
+
+**A verification that cannot finish verifies nothing.** The BIGMIN/LITMAX check was written the
+obvious way, with a linear scan over the key space inside the probe loop: 300 boxes × 32 768 probes
+× a 32 768-key scan is 3 × 10¹¹ operations. It does not fail and it does not finish — it looks like
+a slow test, which is the failure mode least likely to be investigated. Precomputing the oracle per
+box and answering by binary search made it instant, and only then did it verify anything.
+
+**Comparing two structures that answer different questions flatters whichever was asked the easier
+one.** A radix trie was benchmarked against a pointer octree; the first run had the trie answering
+a cell-aligned box while the octree answered a sphere, and reported the octree 3–5× ahead. That
+number was meaningless. Made to answer the same sphere, with both answers asserted equal to brute
+force *and to each other*, the octree still wins 3.6–5.2× — but only the second measurement was
+evidence. The same run also dropped a `BTreeMap` arm rather than keeping it as a loser: probing a
+61-cell-wide box cell by cell is 230 000 lookups, which is not a rival but a straw man, and a bench
+that keeps one is advertising, not measuring.
