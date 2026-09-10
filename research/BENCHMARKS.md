@@ -1202,3 +1202,50 @@ force *and to each other*, the octree still wins 3.6–5.2× — but only the se
 evidence. The same run also dropped a `BTreeMap` arm rather than keeping it as a loser: probing a
 61-cell-wide box cell by cell is 230 000 lookups, which is not a rival but a straw man, and a bench
 that keeps one is advertising, not measuring.
+
+### 10.11 Two bugs that preserved a ratio and destroyed a magnitude
+
+Retraction and replacement for a figure published the same night as § 10.9. The over-scan of a
+naive `[min_key, max_key]` range scan over a query box was reported as **7 299×** (Morton) and
+**7 251×** (Hilbert), with the conclusion that the two curves are *indistinguishable* on this
+metric. Both numbers were wrong by ~72×, and the conclusion was wrong outright. Corrected:
+
+| N | Morton | Hilbert |
+| ---: | ---: | ---: |
+| 100 000 | **102.0×** | 112.2× |
+| 1 000 000 | **101.4×** | 111.3× |
+
+Hilbert is **10 % worse**, not indistinguishable. That is the correct and more interesting result:
+its advantage lies in how many *runs* a box decomposes into, and a span scan does not care about
+runs — it cares about the distance from the box's lowest key to its highest, and Hilbert, not being
+monotone in the coordinates, can place those further apart than Morton, whose extremes sit exactly
+on the low and high corners. Scanning the span throws Hilbert's advantage away *and then charges
+you for having chosen it*.
+
+**Why the wrong numbers survived review.** Two independent defects, and the interaction is the
+lesson:
+
+1. The world-coordinate-to-cell mapping **masked** rather than clamped, so a query box overlapping
+   the world edge wrapped round to the far side and became an enormous different box. Worth ~72×.
+2. Hilbert's extremes were **sampled** — 8 corners plus 6 face centres — with a code comment
+   admitting the sample under-counted Hilbert's advantage. Real, but small.
+
+The masking defect inflated *both* columns by almost exactly the same factor, because both curves
+were being handed the same wrong boxes. So the **ratio between the arms survived intact while the
+magnitude was destroyed** — and a comparison bench is read as a ratio. Nothing looked wrong:
+7 299 against 7 251 is a perfectly plausible "these are the same", and it is exactly what a
+correctly-implemented pair of curves might have produced. The error was invisible precisely because
+it was *common-mode*.
+
+Generalising: **a defect shared by every arm of a comparison is the hardest kind to see, because
+the output of a comparison is a ratio and the ratio is what the defect leaves alone.** The controls
+this repository already relies on — counterbalancing, pairing, independent re-derivation — all
+compare arms against each other and are therefore blind to it. What caught it here was replacing an
+approximation with an exact computation for an unrelated reason (the sampled Hilbert extremes) and
+noticing that a column which *should not have moved at all* — Morton's, whose corner extremes were
+already exact — moved by 72×.
+
+So the check that works is an **absolute** one: at least one number in a comparison must be
+independently predictable, so that "everything shifted together" is detectable. § 10.9's `H/s²`
+column is that check for the locality table; the over-scan table had no such anchor, and went a
+whole night unquestioned.
