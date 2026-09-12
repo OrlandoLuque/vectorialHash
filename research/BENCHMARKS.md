@@ -1315,3 +1315,79 @@ result is the kind that gets written into documentation as a property. If a clai
 proof. A corollary for this repository's habits: *a split rule that asks the data a question
 remembers the answer* — and it is worth auditing each arm of a policy separately, since one arm
 being geometric does not make the policy geometric.
+
+### 10.14 The constant you held fixed, and whether one of the arms chose it
+
+A comparison bench fixes some quantities in order to vary others. § 10.5 showed that the fixed ones
+can decide the answer. This is the sharper, more actionable version of the same failure: **ask
+whether any fixed quantity was set next to a parameter of one of the arms under test.**
+
+Two instances, found the same night, the second by deliberately auditing for the signature after the
+first turned up by accident.
+
+**One radius, one cell.** A benchmark comparing a radix trie against five spatial indexes used a
+single query radius of 300 world units against a uniform grid whose cells were 312 — so the query
+spanned about one cell and the grid was, in effect, performing a single bucket lookup. Making the
+radius an axis (a third of a cell, one cell, three cells) changed the reading and, more importantly,
+revealed the *mechanism*: the trie's penalty grows monotonically with query volume, 4.0× → 5.1× →
+9.3×, which is what a per-item node count must do if it is the cause. One radius would have printed
+one of those three numbers and called it the result.
+
+**One `levels`, three axes.** A second benchmark, publishing ratios quoted in the project's
+documentation, declared a world of 1000 × 300 × 1000 and gave the grid a single subdivision depth for
+all three axes — cells of 31.25 × 9.375 × 31.25. Against a radius-40 query that is ~121 cells where
+cubic cells of the same depth would be ~45, and a uniform grid pays a hash lookup per cell whether
+the cell holds anything or not. Declaring the *index* world a cube costs nothing in a sparse store
+(the layers above the occupied band are never materialised or traversed; item counts asserted equal)
+and made the grid **1.45–1.96× faster** — which took the competing structure's published cull
+advantage from **1.33–1.35× to 1.04–1.09×, a tie**. The number had been measuring a handicap.
+
+One detail makes the diagnosis precise rather than merely plausible: the *k-NN* row of the same table
+survived the change, and it survived because that operation had been given per-axis shell expansion
+in an earlier fix, so it had already stopped caring about cell aspect. The range query never needed
+such a fix and therefore never received one. **A partial fix leaves a bench measuring the unfixed
+half, and nothing announces which half that is.**
+
+### 10.15 A summary statistic of the index is not a predictor of its speed
+
+The grid above exposes a second, independent lesson. Its `Occupancy` report — items per non-empty
+cell — read **7.0** for the slab configuration, squarely inside the band the type itself recommends,
+and **19.6** for the cubic configuration that is twice as fast. The apparently better-tuned grid was
+the slower one.
+
+What ordered all three configurations correctly was not a property of the index but a property of the
+*interaction between the index and the query*: the number of cells a query must look up, `∏(2r/cellᵢ
++ 1)`. Measured ~45 (cubic, coarse) < ~121 (slab) < ~229 (cubic, fine), matching the measured speeds
+exactly — including the counter-intuitive tail, where the **finest** grid has the best occupancy of
+the three (4.4) and is the slowest of the three.
+
+Occupancy is computed over non-empty cells and is therefore blind to both the empty cells a query
+crosses and the *shape* of the cells it crosses. It remains useful for catching a grid that is
+grossly too coarse or too fine. It cannot rank two reasonable configurations, and the documentation
+that said so in the abstract now carries this case.
+
+The general form: **a statistic describing the structure alone cannot predict a cost that depends on
+the structure and the query together.** When a tuning knob is chosen from such a statistic, the
+choice needs validating against the workload, and the validating quantity is usually a count of work
+the query does — which, being a count, can be believed from a single run (§ 10.13).
+
+### 10.16 A capability added to a library must be swept into the benchmarks that predate it
+
+Two structures in this library gained in-place `update` some weeks after their benchmarks were
+written. A sweep was performed at the time for exactly this reason — to find every site still
+rebuilding where it could now keep — and it missed one: a benchmark whose maintenance comparison ran
+one structure through its keep path and two through full rebuilds, annotated with the reason that the
+other two "have no in-place handle". True when written; false for weeks by the time it was read.
+
+Correcting it produced a result opposite to the one predicted, which is the part worth recording. The
+expectation was that keeping would now win for all three. **Rebuilding wins for the two without a
+handle layer, by ~3.0–3.6×.** That is consistent with the crossover already measured elsewhere (near
+70 % of the population moving; this workload moves 100 % every frame), but the magnitude needs the
+mechanism: each `update` call pays a lookup plus a predicate scan over its bucket *even when the item
+has not changed cell*, so 200 000 calls lose to one sequential refill. The structure that wins does
+so because its update is O(1) through a stable handle — the handle *is* the index, so there is
+nothing to look up.
+
+So the corrected conclusion keeps the original ranking and discards the original reason, and the
+distinction matters: **"cannot keep" and "can keep but should not, at this churn, without handles"
+are different facts about a structure**, and only one of them is still true.
