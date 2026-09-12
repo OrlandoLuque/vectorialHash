@@ -1249,3 +1249,69 @@ So the check that works is an **absolute** one: at least one number in a compari
 independently predictable, so that "everything shifted together" is detectable. § 10.9's `H/s²`
 column is that check for the locality table; the over-scan table had no such anchor, and went a
 whole night unquestioned.
+
+### 10.12 A baseline must be a snapshot of the right moment
+
+A maintained adaptive tree was compared against "a rebuild" and found to carry a **1.50×** residual
+excess of leaves — published as the standing price of keeping an adaptive structure in place rather
+than rebuilding it per frame. The bench reported 10 375 kept leaves against 6 939 rebuilt.
+
+The 6 939 was a rebuild from the **starting** point set. The workload is a random walk **clamped**
+to the world box, and a clamped walk is not measure-preserving: over 300 frames the distribution
+migrates toward the walls, so the final points genuinely require more leaves than the initial ones
+did. That excess is a property of the *motion model*, not of the index. Rebuilt from the tree's own
+current contents, the kept tree's leaf count is not merely close — it is **exactly equal**
+(10 375 / 7 236 / 6 990 against 10 375 / 7 236 / 6 990, at 100 / 10 / 1 % churn).
+
+Two details make this worth recording beyond the arithmetic.
+
+**The correct baseline was already computed, four lines away.** The same loop built a rebuild from
+the current contents in order to time queries against it; only its leaf count was never printed. The
+failure was not a missing measurement but a choice between two present ones, decided by which had
+the more inviting label.
+
+**A test and a bench disagreed, and the bench was believed.** The unit test for the same property
+compares against a rebuild from the current points and records exact equality; the bench next to it
+reported 1.50× drift. Two instruments disagreeing about one object is the same alarm as § 10.8's two
+benches disagreeing about one algorithm, and it deserves the same response: suspect the instrument,
+not only the machine.
+
+Generalising: **"compared against a rebuild" is ambiguous in exactly the place that matters — a
+rebuild *of what*, *as of when*.** Whenever the workload alters the data's distribution — and any
+clamped, absorbing or otherwise bounded motion does — a baseline taken at t = 0 silently folds that
+alteration into whatever the comparison is attributing to the structure under test.
+
+### 10.13 One instance can refute a property; it cannot establish one
+
+Having established the equality above, the next step was to gate it with a test over every structure
+in the library that supports in-place maintenance — nine of eleven. The first version of that test
+used **one** random seed. It reported eight structures exactly equal and one, the integer-coordinate
+binary tree, drifting: a tidy result, and a conclusion about the wrong object.
+
+That tree's split policy is a transcription of the floating-point binary tree's, including the part
+that decides a **square** node's split *axis* by counting which side of each candidate plane the
+items fall on. The count is taken on whatever the node held at the instant it split, so it is a
+data-dependent decision, and two histories arriving at the same point set can disagree. Swept over
+**12 seeds**: the float tree drifts on **12 / 12** (worst 1.014×), the integer tree on **11 / 12**
+(worst 1.034×), and the remaining seven on **0 / 12**. One seed had found the mechanism and
+attributed it to whichever of the two structures sharing it happened to trip on that seed.
+
+The 12-seed sweep then exposed a **second**, independent mechanism that nothing was looking for: a
+quadtree, whose quadrant splits involve no data at all, drifted on 2 of 12. The cause is a gap
+between two predicates rather than a data-dependent one: subdivision refuses to split a node whose
+items are *all at a single point* (no plane separates them), while the merge rule collapses children
+only when they jointly fit in one leaf. Those are different questions, so "spread out, split, then
+become coincident" is a one-way door. It appeared in two dimensions and not three because the
+workload *clamped* escapees to exactly the boundary, which in 2D accumulates points on four exactly
+coincident corners, whereas in 3D a point must saturate all three axes at once.
+
+Replacing clamping with reflection took the quadtree to **0 / 12 while leaving the float binary tree
+at 12 / 12** — a single experiment that separates the two mechanisms instead of confounding them.
+
+Generalising, and the asymmetry is the whole point: **a single observation of drift proves that a
+structure can drift; a single observation of no drift proves nothing whatever.** The second kind of
+result is the kind that gets written into documentation as a property. If a claim is of the form
+"always", the evidence must be a sweep; if it is of the form "sometimes", one case suffices as
+proof. A corollary for this repository's habits: *a split rule that asks the data a question
+remembers the answer* — and it is worth auditing each arm of a policy separately, since one arm
+being geometric does not make the policy geometric.
